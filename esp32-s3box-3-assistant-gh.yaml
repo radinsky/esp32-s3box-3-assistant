@@ -1,0 +1,3958 @@
+# GitHub template version.
+# Before first use, update the substitutions below and add the matching
+# `wifi_ssid` / `wifi_password` entries to your ESPHome secrets file.
+# Unused scene/macro/light slots may stay on the `.none` placeholders.
+
+substitutions:
+  name: "esp32-s3box-3-assistant"
+  friendly_name: ESP32-S3-Box-3 Assistant
+
+  # Set this to the media_player object_id only, without the `media_player.` prefix.
+  external_media_player: living_room_speaker
+  climate_entity: climate.your_climate
+  alarm_entity: alarm_control_panel.your_alarm
+  room_temperature_entity: sensor.your_room_temperature
+  last_motion_entity: sensor.last_motion
+  # Used for audio URLs sent to external players. Do not leave this as localhost.
+  home_assistant_host: http://homeassistant.local:8123
+  tts_voice_speed: "24000"
+
+  light_1_label: Light 1
+  light_1_entity: light.your_light_1
+  light_2_label: Light 2
+  light_2_entity: light.none
+  light_3_label: Light 3
+  light_3_entity: light.none
+  light_4_label: Light 4
+  light_4_entity: light.none
+  light_5_label: Light 5
+  light_5_entity: light.none
+  light_6_label: Light 6
+  light_6_entity: light.none
+
+  scene_1_label: Scene 1
+  scene_1_entity: scene.none
+  scene_2_label: Scene 2
+  scene_2_entity: scene.none
+  scene_3_label: Scene 3
+  scene_3_entity: scene.none
+  scene_4_label: Scene 4
+  scene_4_entity: scene.none
+  scene_5_label: Scene 5
+  scene_5_entity: scene.none
+  scene_6_label: Scene 6
+  scene_6_entity: scene.none
+
+  macro_1_label: Macro 1
+  macro_1_entity: script.none
+  macro_2_label: Macro 2
+  macro_2_entity: script.none
+  macro_3_label: Macro 3
+  macro_3_entity: script.none
+  macro_4_label: Macro 4
+  macro_4_entity: script.none
+  macro_5_label: Macro 5
+  macro_5_entity: script.none
+  macro_6_label: Macro 6
+  macro_6_entity: script.none
+
+  wake_word: hey_jarvis
+
+  ui_glyphs: '&@!"''()+=,-_.:°/%?0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz'
+  data_glyphs: '0123456789:-.%C'
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2025.2.0
+  platformio_options:
+    build_flags:
+      # GCC 14 warns on std::is_pod in ESPHome's bundled esp-tflite-micro code.
+      - -Wno-deprecated-declarations
+      # GCC 14 also emits shadow warnings in esp-tflite-micro reference kernels.
+      - -Wno-shadow
+  on_boot:
+    priority: 600
+    then:
+      - lambda: |-
+          id(led).turn_on().set_brightness(id(s_default_brightness).state / 100.0f).perform();
+          id(wakeword_location).publish_state(
+            id(wake_word_engine_location).current_option() == "Cloud relay" ? "Cloud" : "Edge"
+          );
+          id(time_display_format).publish_state(id(time_format).current_option());
+          id(time_remaining_0).publish_state("0:00:00");
+          id(current_pin) = "";
+          id(pending_alarm_action) = "";
+      - display.page.show: boot_page
+      - component.update: s3_box_lcd
+      - script.execute: schedule_saver
+      - if:
+          condition:
+            switch.is_on: output_audio
+          then:
+            - media_player.volume_set:
+                id: speaker_media_player
+                volume: 0
+          else:
+            - script.execute: set_volume
+  project:
+    name: "panel.assistant_canvas"
+    version: "2026.03.28"
+
+esp32:
+  board: esp32s3box
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+api:
+  on_client_connected:
+    - lambda: id(api_connection) = true;
+    - script.execute: wake_screen
+    - component.update: s3_box_lcd
+    - script.execute: schedule_saver
+  on_client_disconnected:
+    - lambda: id(api_connection) = false;
+    - component.update: s3_box_lcd
+
+ota:
+  - platform: esphome
+    on_begin:
+      - lambda: |-
+          id(led).turn_on().set_brightness(1.0f).set_transition_length(0).perform();
+          id(led).loop();
+      - display.page.show: ota_page
+      - component.update: s3_box_lcd
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    text_sensor: WARN
+    component: ERROR
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ${name}
+    password: s3box123
+  on_connect:
+    - lambda: id(wifi_connection) = true;
+    - switch.turn_on: speaker_enable
+    - display.page.show: dashboard_page
+    - component.update: s3_box_lcd
+  on_disconnect:
+    - lambda: id(wifi_connection) = false;
+    - component.update: s3_box_lcd
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+interval:
+  - interval: 30s
+    then:
+      - component.update: s3_box_lcd
+  - interval: 800ms
+    then:
+      - lambda: id(ui_tick) += 1;
+      - component.update: s3_box_lcd
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            lambda: return (id(api_connection) != true);
+          then:
+            - if:
+                condition:
+                  api.connected:
+                then:
+                  - lambda: id(api_connection) = true;
+          else:
+            - if:
+                condition:
+                  not:
+                    api.connected:
+                then:
+                  - lambda: id(api_connection) = false;
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            lambda: return (id(wifi_connection) != true);
+          then:
+            - if:
+                condition:
+                  wifi.connected:
+                then:
+                  - lambda: id(wifi_connection) = true;
+          else:
+            - if:
+                condition:
+                  not:
+                    wifi.connected:
+                then:
+                  - lambda: id(wifi_connection) = false;
+
+select:
+  - platform: template
+    entity_category: config
+    name: Wake path
+    id: wake_word_engine_location
+    optimistic: true
+    restore_value: true
+    options:
+      - Cloud relay
+      - Edge wake
+    initial_option: Edge wake
+    on_value:
+      - if:
+          condition:
+            lambda: return x == "Cloud relay";
+          then:
+            - micro_wake_word.stop
+            - delay: 500ms
+            - lambda: id(va).set_use_wake_word(true);
+            - voice_assistant.start_continuous:
+            - text_sensor.template.publish:
+                id: wakeword_location
+                state: "Cloud"
+      - if:
+          condition:
+            lambda: return x == "Edge wake";
+          then:
+            - text_sensor.template.publish:
+                id: wakeword_location
+                state: "Edge"
+            - lambda: id(va).set_use_wake_word(false);
+            - voice_assistant.stop
+            - delay: 500ms
+            - micro_wake_word.start
+      - component.update: s3_box_lcd
+
+  - platform: template
+    entity_category: config
+    name: Clock mode
+    id: time_format
+    optimistic: true
+    restore_value: true
+    options:
+      - 12h
+      - 24h
+    initial_option: 24h
+    on_value:
+      - text_sensor.template.publish:
+          id: time_display_format
+          state: !lambda 'return x;'
+      - component.update: s3_box_lcd
+
+script:
+  - id: wake_screen
+    then:
+      - lambda: id(led).turn_on().set_brightness(id(s_default_brightness).state / 100.0f).perform();
+
+  - id: show_dashboard
+    then:
+      - script.execute: wake_screen
+      - display.page.show: dashboard_page
+      - component.update: s3_box_lcd
+      - script.execute: schedule_saver
+
+  - id: start_voice_assistant
+    then:
+      - if:
+          condition:
+            switch.is_off: mute_switch
+          then:
+            - if:
+                condition:
+                  lambda: return id(wake_word_engine_location).current_option() == "Cloud relay";
+                then:
+                  - lambda: id(va).set_use_wake_word(true);
+                  - voice_assistant.start_continuous:
+            - if:
+                condition:
+                  lambda: return id(wake_word_engine_location).current_option() == "Edge wake";
+                then:
+                  - lambda: id(va).set_use_wake_word(false);
+                  - micro_wake_word.start
+
+  - id: stop_voice_assistant
+    then:
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).current_option() == "Cloud relay";
+          then:
+            - lambda: id(va).set_use_wake_word(false);
+            - voice_assistant.stop
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).current_option() == "Edge wake";
+          then:
+            - voice_assistant.stop
+            - micro_wake_word.stop
+
+  - id: set_volume
+    then:
+      - media_player.volume_set:
+          id: speaker_media_player
+          volume: !lambda return 0.5f + id(speaker_volume) * 0.05f;
+
+  - id: schedule_saver
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: s_saver
+          then:
+            - lambda: id(led).turn_on().set_brightness(id(s_default_brightness).state / 100.0f).perform();
+            - delay: !lambda return id(s_saver_delay).state * 1000;
+            - lambda: id(led).turn_on().set_brightness(id(s_saver_brightness).state / 100.0f).perform();
+            - display.page.show: saver_page
+            - component.update: s3_box_lcd
+      - if:
+          condition:
+            switch.is_on: s_saver_mode
+          then:
+            - delay: !lambda return id(s_saver_blank_delay).state * 1000;
+            - light.turn_off: led
+
+  - id: manual_saver
+    mode: restart
+    then:
+      - lambda: id(led).turn_on().set_brightness(id(s_saver_brightness).state / 100.0f).perform();
+      - display.page.show: saver_page
+      - component.update: s3_box_lcd
+      - if:
+          condition:
+            switch.is_on: s_saver_mode
+          then:
+            - delay: !lambda return id(s_saver_blank_delay).state * 1000;
+            - light.turn_off: led
+
+  - id: timer_started_external
+    then:
+      - while:
+          condition:
+            switch.is_on: timer_ringing
+          then:
+            - homeassistant.service:
+                service: media_player.play_media
+                data:
+                  entity_id: media_player.${external_media_player}
+                  media_content_id: "${home_assistant_host}/local/sounds/timer_finished.mp3"
+                  media_content_type: music
+            - delay: 1700ms
+
+  - id: timer_ending
+    then:
+      - wait_until:
+          lambda: return id(time_remaining_0).state == "0:00:10";
+      - display.page.show: timer_page
+      - component.update: s3_box_lcd
+
+  - id: submit_alarm_action
+    then:
+      - if:
+          condition:
+            lambda: return id(pending_alarm_action) == "disarm";
+          then:
+            - homeassistant.service:
+                service: alarm_control_panel.alarm_disarm
+                data:
+                  entity_id: ${alarm_entity}
+                  code: !lambda return id(current_pin).c_str();
+      - if:
+          condition:
+            lambda: return id(pending_alarm_action) == "arm_home";
+          then:
+            - homeassistant.service:
+                service: alarm_control_panel.alarm_arm_home
+                data:
+                  entity_id: ${alarm_entity}
+                  code: !lambda return id(current_pin).c_str();
+      - if:
+          condition:
+            lambda: return id(pending_alarm_action) == "arm_away";
+          then:
+            - homeassistant.service:
+                service: alarm_control_panel.alarm_arm_away
+                data:
+                  entity_id: ${alarm_entity}
+                  code: !lambda return id(current_pin).c_str();
+      - if:
+          condition:
+            lambda: return id(pending_alarm_action) == "arm_night";
+          then:
+            - homeassistant.service:
+                service: alarm_control_panel.alarm_arm_night
+                data:
+                  entity_id: ${alarm_entity}
+                  code: !lambda return id(current_pin).c_str();
+      - lambda: |-
+          id(current_pin) = "";
+          id(pending_alarm_action) = "";
+      - display.page.show: security_page
+      - component.update: s3_box_lcd
+
+  - id: show_notification
+    then:
+      - script.execute: wake_screen
+      - display.page.show: notification_page
+      - component.update: s3_box_lcd
+      - delay: 8s
+      - display.page.show: dashboard_page
+      - component.update: s3_box_lcd
+      - script.execute: schedule_saver
+
+  - id: light_pref_set_1
+    then:
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: !lambda |-
+              if (id(selected_light_slot) == 1) return std::string("${light_1_entity}");
+              if (id(selected_light_slot) == 2) return std::string("${light_2_entity}");
+              if (id(selected_light_slot) == 3) return std::string("${light_3_entity}");
+              if (id(selected_light_slot) == 4) return std::string("${light_4_entity}");
+              if (id(selected_light_slot) == 5) return std::string("${light_5_entity}");
+              return std::string("${light_6_entity}");
+            brightness_pct: "1"
+      - component.update: s3_box_lcd
+
+  - id: light_pref_set_25
+    then:
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: !lambda |-
+              if (id(selected_light_slot) == 1) return std::string("${light_1_entity}");
+              if (id(selected_light_slot) == 2) return std::string("${light_2_entity}");
+              if (id(selected_light_slot) == 3) return std::string("${light_3_entity}");
+              if (id(selected_light_slot) == 4) return std::string("${light_4_entity}");
+              if (id(selected_light_slot) == 5) return std::string("${light_5_entity}");
+              return std::string("${light_6_entity}");
+            brightness_pct: "25"
+      - component.update: s3_box_lcd
+
+  - id: light_pref_set_50
+    then:
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: !lambda |-
+              if (id(selected_light_slot) == 1) return std::string("${light_1_entity}");
+              if (id(selected_light_slot) == 2) return std::string("${light_2_entity}");
+              if (id(selected_light_slot) == 3) return std::string("${light_3_entity}");
+              if (id(selected_light_slot) == 4) return std::string("${light_4_entity}");
+              if (id(selected_light_slot) == 5) return std::string("${light_5_entity}");
+              return std::string("${light_6_entity}");
+            brightness_pct: "50"
+      - component.update: s3_box_lcd
+
+  - id: light_pref_set_100
+    then:
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: !lambda |-
+              if (id(selected_light_slot) == 1) return std::string("${light_1_entity}");
+              if (id(selected_light_slot) == 2) return std::string("${light_2_entity}");
+              if (id(selected_light_slot) == 3) return std::string("${light_3_entity}");
+              if (id(selected_light_slot) == 4) return std::string("${light_4_entity}");
+              if (id(selected_light_slot) == 5) return std::string("${light_5_entity}");
+              return std::string("${light_6_entity}");
+            brightness_pct: "100"
+      - component.update: s3_box_lcd
+
+  - id: light_pref_color_orange
+    then:
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: !lambda |-
+              if (id(selected_light_slot) == 1) return std::string("${light_1_entity}");
+              if (id(selected_light_slot) == 2) return std::string("${light_2_entity}");
+              if (id(selected_light_slot) == 3) return std::string("${light_3_entity}");
+              if (id(selected_light_slot) == 4) return std::string("${light_4_entity}");
+              if (id(selected_light_slot) == 5) return std::string("${light_5_entity}");
+              return std::string("${light_6_entity}");
+            color_name: "orange"
+      - component.update: s3_box_lcd
+
+  - id: light_pref_color_red
+    then:
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: !lambda |-
+              if (id(selected_light_slot) == 1) return std::string("${light_1_entity}");
+              if (id(selected_light_slot) == 2) return std::string("${light_2_entity}");
+              if (id(selected_light_slot) == 3) return std::string("${light_3_entity}");
+              if (id(selected_light_slot) == 4) return std::string("${light_4_entity}");
+              if (id(selected_light_slot) == 5) return std::string("${light_5_entity}");
+              return std::string("${light_6_entity}");
+            color_name: "red"
+      - component.update: s3_box_lcd
+
+  - id: light_pref_color_purple
+    then:
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: !lambda |-
+              if (id(selected_light_slot) == 1) return std::string("${light_1_entity}");
+              if (id(selected_light_slot) == 2) return std::string("${light_2_entity}");
+              if (id(selected_light_slot) == 3) return std::string("${light_3_entity}");
+              if (id(selected_light_slot) == 4) return std::string("${light_4_entity}");
+              if (id(selected_light_slot) == 5) return std::string("${light_5_entity}");
+              return std::string("${light_6_entity}");
+            color_name: "purple"
+      - component.update: s3_box_lcd
+
+  - id: light_pref_color_white
+    then:
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: !lambda |-
+              if (id(selected_light_slot) == 1) return std::string("${light_1_entity}");
+              if (id(selected_light_slot) == 2) return std::string("${light_2_entity}");
+              if (id(selected_light_slot) == 3) return std::string("${light_3_entity}");
+              if (id(selected_light_slot) == 4) return std::string("${light_4_entity}");
+              if (id(selected_light_slot) == 5) return std::string("${light_5_entity}");
+              return std::string("${light_6_entity}");
+            color_name: "white"
+      - component.update: s3_box_lcd
+
+globals:
+  - id: wifi_connection
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: api_connection
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: speaker_volume
+    type: int
+    restore_value: no
+    initial_value: "5"
+  - id: media_state
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: current_pin
+    type: std::string
+    initial_value: ""
+  - id: previous_notification_text
+    type: std::string
+    initial_value: ""
+  - id: home_button_press_time
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: is_long_press
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: global_is_assisting
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: ui_tick
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: pending_alarm_action
+    type: std::string
+    initial_value: ""
+  - id: light_press_start
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: selected_light_slot
+    type: int
+    restore_value: no
+    initial_value: "1"
+
+number:
+  - id: s_saver_delay
+    platform: template
+    name: "Idle dim delay"
+    icon: mdi:sleep
+    entity_category: config
+    unit_of_measurement: secs
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    step: 5
+    min_value: 10
+    max_value: 999999
+    on_value:
+      - component.update: s3_box_lcd
+      - script.execute: schedule_saver
+
+  - id: s_saver_blank_delay
+    platform: template
+    name: "Idle blank delay"
+    icon: mdi:monitor-off
+    entity_category: config
+    unit_of_measurement: secs
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    step: 5
+    min_value: 10
+    max_value: 999999
+    on_value:
+      - component.update: s3_box_lcd
+      - script.execute: schedule_saver
+
+  - id: s_saver_brightness
+    platform: template
+    name: "Idle brightness"
+    icon: mdi:brightness-4
+    entity_category: config
+    unit_of_measurement: "%"
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    step: 5
+    min_value: 20
+    max_value: 100
+    on_value:
+      - component.update: s3_box_lcd
+      - script.execute: schedule_saver
+
+  - id: s_default_brightness
+    platform: template
+    name: "Active brightness"
+    icon: mdi:brightness-6
+    entity_category: config
+    unit_of_measurement: "%"
+    optimistic: true
+    restore_value: true
+    initial_value: 100
+    step: 5
+    min_value: 20
+    max_value: 100
+    on_value:
+      - component.update: s3_box_lcd
+      - script.execute: schedule_saver
+
+button:
+  - platform: restart
+    id: reboot
+    name: Reboot
+    entity_category: diagnostic
+
+switch:
+  - platform: gpio
+    name: Speaker enable
+    id: speaker_enable
+    pin:
+      number: GPIO46
+      ignore_strapping_warning: true
+    restore_mode: ALWAYS_OFF
+    entity_category: config
+    disabled_by_default: true
+
+  - platform: template
+    name: Show transcript
+    id: display_conversation
+    icon: mdi:chat
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
+  - platform: template
+    name: Route audio outward
+    id: output_audio
+    icon: mdi:cast-audio
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_on:
+      - media_player.volume_set:
+          id: speaker_media_player
+          volume: 0
+      - component.update: s3_box_lcd
+    on_turn_off:
+      - script.execute: set_volume
+      - component.update: s3_box_lcd
+
+  - platform: template
+    name: Mute assistant
+    id: mute_switch
+    icon: mdi:microphone-off
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_on:
+      - voice_assistant.stop
+      - micro_wake_word.stop
+      - component.update: s3_box_lcd
+    on_turn_off:
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - script.execute: start_voice_assistant
+      - component.update: s3_box_lcd
+
+  - platform: template
+    id: media_mute
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - media_player.volume_set:
+          id: speaker_media_player
+          volume: 0
+      - component.update: s3_box_lcd
+    on_turn_off:
+      - script.execute: set_volume
+      - component.update: s3_box_lcd
+
+  - platform: template
+    id: ext_media_mute
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - homeassistant.service:
+          service: media_player.volume_mute
+          data:
+            entity_id: media_player.${external_media_player}
+            is_volume_muted: "true"
+      - component.update: s3_box_lcd
+    on_turn_off:
+      - homeassistant.service:
+          service: media_player.volume_mute
+          data:
+            entity_id: media_player.${external_media_player}
+            is_volume_muted: "false"
+      - component.update: s3_box_lcd
+
+  - platform: template
+    id: s_saver
+    name: Idle view enabled
+    icon: mdi:sleep
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
+  - platform: template
+    id: s_saver_mode
+    name: Blank after idle
+    icon: mdi:monitor-off
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
+  - platform: template
+    id: s_saver_presc
+    name: Wake on movement
+    icon: mdi:motion-sensor
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - lambda: id(va).set_use_wake_word(false);
+      - voice_assistant.stop
+      - micro_wake_word.stop
+      - delay: 150ms
+      - lambda: id(led).turn_on().set_brightness(1.0f).perform();
+      - lambda: |-
+          id(speaker_media_player)
+            ->make_call()
+            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_ONE)
+            .set_announcement(true)
+            .perform();
+          id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 1000);
+      - media_player.speaker.play_on_device_media_file:
+          media_file: timer_finished_sound
+          announcement: true
+      - delay: 15min
+      - switch.turn_off: timer_ringing
+    on_turn_off:
+      - lambda: |-
+          id(speaker_media_player)
+            ->make_call()
+            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_OFF)
+            .set_announcement(true)
+            .perform();
+          id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
+      - media_player.stop:
+          announcement: true
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).current_option() == "Edge wake";
+          then:
+            - lambda: id(va).set_use_wake_word(false);
+            - micro_wake_word.start
+          else:
+            - lambda: id(va).set_use_wake_word(true);
+            - voice_assistant.start
+
+  - platform: template
+    id: wake_sound
+    name: Wake earcon
+    icon: mdi:music
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: template
+    id: mute_response_switch
+    name: Silent replies
+    icon: mdi:chat-sleep
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+output:
+  - platform: ledc
+    pin: GPIO47
+    id: backlight_output
+
+light:
+  - platform: monochromatic
+    id: led
+    name: LCD Backlight
+    entity_category: config
+    output: backlight_output
+    restore_mode: ALWAYS_ON
+    default_transition_length: 50ms
+
+sensor:
+  - platform: homeassistant
+    id: ac_room_temperature
+    entity_id: ${room_temperature_entity}
+
+  - platform: homeassistant
+    id: ac_current_temperature
+    entity_id: ${climate_entity}
+    attribute: current_temperature
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: ac_target_temperature
+    entity_id: ${climate_entity}
+    attribute: temperature
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: ac_current_humidity
+    entity_id: ${climate_entity}
+    attribute: current_humidity
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: aht10
+    i2c_id: bus_b
+    variant: AHT20
+    temperature:
+      name: S3 Temperature
+      id: s3temp
+    humidity:
+      name: S3 Humidity
+      id: s3humidity
+    update_interval: 60s
+
+  - platform: uptime
+    id: up_sens
+    update_interval: 30s
+    on_value:
+      - lambda: |-
+          int seconds = id(up_sens).state;
+          int days = seconds / 86400;
+          int hours = seconds / 3600;
+          int minutes = (seconds % 3600) / 60;
+          seconds %= 60;
+          id(up_sens_text).publish_state(str_sprintf("%03d:%02d:%02d:%02d", days, hours, minutes, seconds));
+
+  - platform: wifi_signal
+    name: WiFi db
+    id: wifi_signal_db
+    update_interval: 30s
+
+  - platform: copy
+    source_id: wifi_signal_db
+    name: WiFi Signal
+    id: wifi_percent
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+    device_class: ""
+    filters:
+      - lambda: return min(max(2 * (x + 100.0f), 0.0f), 100.0f);
+
+text_sensor:
+  - id: text_request
+    platform: template
+    on_value:
+      - lambda: |-
+          if (id(text_request).state.length() > 44) {
+            std::string truncated = esphome::str_truncate(id(text_request).state.c_str(), 41);
+            id(text_request).state = (truncated + "...").c_str();
+          }
+
+  - id: text_response
+    platform: template
+    on_value:
+      - lambda: |-
+          if (id(text_response).state.length() > 44) {
+            std::string truncated = esphome::str_truncate(id(text_response).state.c_str(), 41);
+            id(text_response).state = (truncated + "...").c_str();
+          }
+
+  - platform: wifi_info
+    ip_address:
+      name: IP Address
+      id: ip_addr
+      entity_category: diagnostic
+    ssid:
+      name: SSID
+      id: connected_ssid
+      entity_category: diagnostic
+    bssid:
+      id: connected_bssid
+      name: BSSID
+      entity_category: diagnostic
+    mac_address:
+      id: device_mac
+
+  - platform: template
+    id: up_sens_text
+    name: Device uptime
+    entity_category: diagnostic
+    icon: mdi:clock
+
+  - platform: template
+    id: wakeword_location
+
+  - platform: template
+    id: time_remaining_0
+    name: Timer
+    icon: mdi:clock
+
+  - platform: template
+    id: time_display_format
+    update_interval: never
+
+  - platform: homeassistant
+    id: ha_media_status
+    entity_id: media_player.${external_media_player}
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: ha_media_title
+    entity_id: media_player.${external_media_player}
+    attribute: media_title
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: alarm_status
+    entity_id: ${alarm_entity}
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: last_motion_where
+    entity_id: ${last_motion_entity}
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: last_motion_time
+    entity_id: ${last_motion_entity}
+    attribute: time_history
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: ac_hvac_mode
+    entity_id: ${climate_entity}
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: ac_fan_mode
+    entity_id: ${climate_entity}
+    attribute: fan_mode
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: light_1_state
+    entity_id: ${light_1_entity}
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: light_2_state
+    entity_id: ${light_2_entity}
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: light_3_state
+    entity_id: ${light_3_entity}
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: light_4_state
+    entity_id: ${light_4_entity}
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: light_5_state
+    entity_id: ${light_5_entity}
+    on_value:
+      - component.update: s3_box_lcd
+
+  - platform: homeassistant
+    id: light_6_state
+    entity_id: ${light_6_entity}
+    on_value:
+      - component.update: s3_box_lcd
+
+text:
+  - platform: template
+    name: Inbox text
+    id: notification_text
+    mode: text
+    optimistic: true
+    on_value:
+      then:
+        - lambda: |-
+            if (!id(notification_text).state.empty() &&
+                (id(previous_notification_text).empty() || id(notification_text).state != id(previous_notification_text))) {
+              id(previous_notification_text) = id(notification_text).state;
+              id(show_notification).execute();
+            }
+
+i2s_audio:
+  - id: i2s_audio_bus
+    i2s_lrclk_pin:
+      number: GPIO45
+      ignore_strapping_warning: true
+    i2s_bclk_pin: GPIO17
+    i2s_mclk_pin: GPIO2
+
+audio_adc:
+  - platform: es7210
+    id: es7210_adc
+    i2c_id: bus_a
+    bits_per_sample: 16bit
+    sample_rate: 16000
+
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    i2c_id: bus_a
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+microphone:
+  - platform: i2s_audio
+    id: box_mic
+    sample_rate: 16000
+    i2s_din_pin: GPIO16
+    bits_per_sample: 16bit
+    adc_type: external
+
+speaker:
+  - id: i2s_audio_speaker
+    platform: i2s_audio
+    i2s_audio_id: i2s_audio_bus
+    i2s_dout_pin: GPIO15
+    dac_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: left
+    audio_dac: es8311_dac
+    buffer_duration: 500ms
+
+  - id: mixing_speaker
+    platform: mixer
+    output_speaker: i2s_audio_speaker
+    source_speakers:
+      - id: announcement_mixing_input
+      - id: media_mixing_input
+
+  - platform: resampler
+    id: announcement_resampling_speaker
+    output_speaker: announcement_mixing_input
+    sample_rate: 48000
+
+  - platform: resampler
+    id: media_resampling_speaker
+    output_speaker: media_mixing_input
+    sample_rate: 48000
+
+media_player:
+  - platform: speaker
+    name: s3-box media player
+    id: speaker_media_player
+    volume_increment: 0.05
+    volume_min: 0.5
+    volume_max: 0.8
+    task_stack_in_psram: true
+    announcement_pipeline:
+      speaker: announcement_resampling_speaker
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1
+    media_pipeline:
+      speaker: media_resampling_speaker
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 2
+    files:
+      - id: timer_finished_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+      - id: wake_sound_file
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
+    on_state:
+      then:
+        - if:
+            condition:
+              media_player.is_playing
+            then:
+              - lambda: id(media_state) = true;
+            else:
+              - lambda: id(media_state) = false;
+        - if:
+            condition:
+              media_player.is_playing
+            then:
+              - micro_wake_word.stop
+              - voice_assistant.stop
+        - if:
+            condition:
+              and:
+                - lambda: return id(global_is_assisting) == false;
+                - or:
+                    - media_player.is_idle
+                    - media_player.is_paused
+            then:
+              - if:
+                  condition:
+                    and:
+                      - switch.is_off: mute_switch
+                      - lambda: return id(wake_word_engine_location).current_option() == "Edge wake";
+                  then:
+                    - micro_wake_word.start
+                  else:
+                    - if:
+                        condition:
+                          switch.is_off: mute_switch
+                        then:
+                          - voice_assistant.start
+        - if:
+            condition:
+              and:
+                - switch.is_off: timer_ringing
+                - not:
+                    voice_assistant.is_running:
+                - not:
+                    media_player.is_announcing:
+            then:
+              - mixer_speaker.apply_ducking:
+                  id: media_mixing_input
+                  decibel_reduction: 0
+                  duration: 1.0s
+        - component.update: s3_box_lcd
+    on_play:
+      - wait_until:
+          lambda: return id(global_is_assisting) == false;
+    on_announcement:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 20
+          duration: 0s
+
+micro_wake_word:
+  vad:
+  models:
+    - model: ${wake_word}
+  on_wake_word_detected:
+    - lambda: id(global_is_assisting) = true;
+    - delay: 50ms
+    - if:
+        condition:
+          and:
+            - switch.is_off: output_audio
+            - switch.is_on: wake_sound
+        then:
+          - media_player.speaker.play_on_device_media_file:
+              media_file: wake_sound_file
+              announcement: true
+          - wait_until:
+              not:
+                media_player.is_announcing:
+          - delay: 150ms
+        else:
+          if:
+            condition:
+              and:
+                - switch.is_on: output_audio
+                - switch.is_on: wake_sound
+            then:
+              - homeassistant.service:
+                  service: media_player.play_media
+                  data:
+                    entity_id: media_player.${external_media_player}
+                    media_content_id: "${home_assistant_host}/local/sounds/awake.mp3"
+                    media_content_type: music
+    - display.page.show: assistant_listening_page
+    - component.update: s3_box_lcd
+    - delay: 100ms
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+voice_assistant:
+  id: va
+  microphone: box_mic
+  media_player: speaker_media_player
+  use_wake_word: true
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 4.0
+  on_wake_word_detected:
+    - lambda: id(global_is_assisting) = true;
+    - voice_assistant.stop
+    - lambda: id(va).set_use_wake_word(false);
+    - if:
+        condition:
+          and:
+            - switch.is_off: output_audio
+            - switch.is_on: wake_sound
+        then:
+          - media_player.speaker.play_on_device_media_file:
+              media_file: wake_sound_file
+              announcement: true
+          - wait_until:
+              not:
+                media_player.is_announcing:
+          - delay: 150ms
+          - display.page.show: assistant_listening_page
+          - component.update: s3_box_lcd
+        else:
+          if:
+            condition:
+              and:
+                - switch.is_on: wake_sound
+                - switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.play_media
+                  data:
+                    entity_id: media_player.${external_media_player}
+                    media_content_id: "${home_assistant_host}/local/sounds/awake.mp3"
+                    media_content_type: music
+    - voice_assistant.start
+  on_listening:
+    - text_sensor.template.publish:
+        id: text_request
+        state: "..."
+    - text_sensor.template.publish:
+        id: text_response
+        state: "..."
+    - display.page.show: assistant_listening_page
+    - component.update: s3_box_lcd
+  on_stt_end:
+    - text_sensor.template.publish:
+        id: text_request
+        state: !lambda return x;
+  on_stt_vad_end:
+    - display.page.show: assistant_thinking_page
+    - component.update: s3_box_lcd
+  on_tts_start:
+    - text_sensor.template.publish:
+        id: text_response
+        state: !lambda return x;
+  on_tts_end:
+    - if:
+        condition:
+          and:
+            - switch.is_on: mute_response_switch
+            - switch.is_off: media_mute
+            - switch.is_off: ext_media_mute
+        then:
+          - switch.turn_on: media_mute
+          - switch.turn_on: ext_media_mute
+    - display.page.show: assistant_replying_page
+    - component.update: s3_box_lcd
+    - if:
+        condition:
+          switch.is_on: output_audio
+        then:
+          - homeassistant.service:
+              service: media_player.play_media
+              data:
+                entity_id: media_player.${external_media_player}
+                media_content_id: !lambda 'return x;'
+                media_content_type: music
+                announce: "false"
+    - delay: 5s
+    - display.page.show: dashboard_page
+    - component.update: s3_box_lcd
+  on_error:
+    - if:
+        condition:
+          not:
+            voice_assistant.is_running:
+        then:
+          - display.page.show: assistant_error_page
+          - component.update: s3_box_lcd
+          - delay: 4s
+          - display.page.show: dashboard_page
+          - component.update: s3_box_lcd
+    - lambda: id(global_is_assisting) = false;
+  on_idle:
+    - display.page.show: dashboard_page
+    - component.update: s3_box_lcd
+  on_end:
+    - wait_until:
+        not:
+          voice_assistant.is_running:
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 0
+        duration: 1.0s
+    - lambda: id(global_is_assisting) = false;
+    - if:
+        condition:
+          and:
+            - switch.is_off: mute_switch
+            - lambda: return id(wake_word_engine_location).current_option() == "Edge wake";
+        then:
+          - voice_assistant.stop
+          - micro_wake_word.start
+        else:
+          if:
+            condition:
+              switch.is_off: mute_switch
+            then:
+              - lambda: id(va).set_use_wake_word(false);
+              - voice_assistant.stop
+              - delay: 100ms
+              - lambda: id(va).set_use_wake_word(true);
+              - delay: 100ms
+              - voice_assistant.start
+    - if:
+        condition:
+          and:
+            - switch.is_on: mute_response_switch
+            - switch.is_on: media_mute
+            - switch.is_on: ext_media_mute
+        then:
+          - switch.turn_off: media_mute
+          - switch.turn_off: ext_media_mute
+    - script.execute: schedule_saver
+  on_client_connected:
+    - if:
+        condition:
+          and:
+            - switch.is_off: mute_switch
+            - lambda: return id(wake_word_engine_location).current_option() == "Edge wake";
+        then:
+          - micro_wake_word.start
+        else:
+          - if:
+              condition:
+                switch.is_off: mute_switch
+              then:
+                - lambda: id(va).set_use_wake_word(true);
+                - voice_assistant.start
+  on_timer_started:
+    - script.execute: timer_ending
+    - component.update: s3_box_lcd
+  on_timer_cancelled:
+    - lambda: id(time_remaining_0).publish_state("0:00:00");
+    - component.update: s3_box_lcd
+  on_timer_updated:
+    - component.update: s3_box_lcd
+  on_timer_tick:
+    - lambda: |-
+        int seconds = timers[0].seconds_left;
+        int hours = seconds / 3600;
+        int minutes = (seconds % 3600) / 60;
+        seconds %= 60;
+        id(time_remaining_0).publish_state(str_sprintf("%d:%02d:%02d", hours, minutes, seconds));
+    - component.update: s3_box_lcd
+  on_timer_finished:
+    - if:
+        condition:
+          switch.is_on: output_audio
+        then:
+          - switch.turn_on: timer_ringing
+          - script.execute: timer_started_external
+        else:
+          - switch.turn_on: timer_ringing
+    - display.page.show: timer_finished_page
+    - component.update: s3_box_lcd
+
+font:
+  - file: gfonts://Space Grotesk
+    id: font_ui_12
+    size: 12
+    glyphs: "${ui_glyphs}"
+
+  - file: gfonts://Space Grotesk
+    id: font_ui_14
+    size: 14
+    glyphs: "${ui_glyphs}"
+
+  - file: gfonts://Space Grotesk
+    id: font_ui_16
+    size: 16
+    glyphs: "${ui_glyphs}"
+
+  - file: gfonts://Space Grotesk
+    id: font_ui_18
+    size: 18
+    glyphs: "${ui_glyphs}"
+
+  - file: gfonts://Space Grotesk
+    id: font_title_20
+    size: 20
+    glyphs: "${ui_glyphs}"
+
+  - file: gfonts://Space Grotesk
+    id: font_title_24
+    size: 24
+    glyphs: "${ui_glyphs}"
+
+  - file: gfonts://Space Grotesk
+    id: font_data_18
+    size: 18
+    glyphs: "${data_glyphs}"
+
+  - file: gfonts://Space Grotesk
+    id: font_data_28
+    size: 28
+    glyphs: "${data_glyphs}"
+
+  - file: gfonts://Space Grotesk
+    id: font_data_42
+    size: 42
+    glyphs: "${data_glyphs}"
+
+  - file: gfonts://Orbitron
+    id: saver_font_clock
+    size: 76
+    glyphs: "0123456789:- "
+
+  - file: gfonts://Orbitron
+    id: saver_font_temp
+    size: 42
+    glyphs: "0123456789.C- "
+
+  - file: https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf
+    id: icon_xs
+    size: 22
+    glyphs: &mdi_glyphs
+      - "\U000F0150"
+      - "\U000F0210"
+      - "\U000F0238"
+      - "\U000F0336"
+      - "\U000F036C"
+      - "\U000F036D"
+      - "\U000F03E4"
+      - "\U000F040A"
+      - "\U000F040E"
+      - "\U000F0493"
+      - "\U000F04AD"
+      - "\U000F04AE"
+      - "\U000F0141"
+      - "\U000F0142"
+      - "\U000F0502"
+      - "\U000F0521"
+      - "\U000F0565"
+      - "\U000F057E"
+      - "\U000F0581"
+      - "\U000F068A"
+      - "\U000F06E8"
+      - "\U000F0717"
+      - "\U000F075A"
+      - "\U000F075D"
+      - "\U000F075E"
+      - "\U000F07D0"
+      - "\U000F087B"
+      - "\U000F08D6"
+      - "\U000F099D"
+      - "\U000F099E"
+      - "\U000F0A19"
+      - "\U000F0B26"
+      - "\U000F0B28"
+      - "\U000F0B2A"
+      - "\U000F0B2C"
+      - "\U000F0FCE"
+      - "\U000F1322"
+      - "\U000F16BC"
+      - "\U000F16BD"
+      - "\U000F1828"
+      - "\U000F1A12"
+      - "\U000F1C6F"
+
+  - file: https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf
+    id: icon_sm
+    size: 30
+    glyphs: *mdi_glyphs
+
+  - file: https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf
+    id: icon_md
+    size: 44
+    glyphs: *mdi_glyphs
+
+  - file: https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf
+    id: icon_lg
+    size: 96
+    glyphs: *mdi_glyphs
+
+color:
+  - id: ink
+    hex: "121212"
+  - id: surface_0
+    hex: "0E0E0E"
+  - id: surface_1
+    hex: "1C1B1B"
+  - id: surface_2
+    hex: "2A2A2A"
+  - id: line
+    hex: "353534"
+  - id: text_main
+    hex: "E5E2E1"
+  - id: text_muted
+    hex: "D4C5AB"
+  - id: text_soft
+    hex: "9C8F78"
+  - id: accent_green
+    hex: "6FFBBE"
+  - id: accent_blue
+    hex: "00A2FD"
+  - id: accent_cyan
+    hex: "98CBFF"
+  - id: accent_amber
+    hex: "FFBF00"
+  - id: accent_rose
+    hex: "FFB8AE"
+  - id: accent_red
+    hex: "FF3B30"
+  - id: accent_violet
+    hex: "C28BFF"
+  - id: accent_teal
+    hex: "4EDEA3"
+  - id: white
+    hex: "FFFFFF"
+  - id: black
+    hex: "000000"
+
+spi:
+  clk_pin: 7
+  mosi_pin: 6
+
+display:
+  - platform: ili9xxx
+    id: s3_box_lcd
+    model: S3BOX
+    data_rate: 40MHz
+    cs_pin: 5
+    dc_pin: 4
+    reset_pin:
+      number: 48
+      inverted: true
+    update_interval: never
+    invert_colors: false
+    pages:
+      - id: dashboard_page
+        lambda: |-
+          auto format_temp = [&](float value, int decimals = 0) -> std::string {
+            if (!(value == value)) return "--";
+            return decimals == 0 ? str_sprintf("%.0fC", value) : str_sprintf("%.1fC", value);
+          };
+          auto motion_age = [&]() -> std::string {
+            auto now = id(ha_time).now();
+            if (!now.is_valid() || id(last_motion_time).state.length() < 19) return "--";
+            std::tm tm = {};
+            int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+            if (sscanf(id(last_motion_time).state.c_str(), "%d-%d-%d %d:%d:%d", &year, &month, &day, &hour, &minute, &second) != 6) return "--";
+            tm.tm_year = year - 1900;
+            tm.tm_mon = month - 1;
+            tm.tm_mday = day;
+            tm.tm_hour = hour;
+            tm.tm_min = minute;
+            tm.tm_sec = second;
+            tm.tm_isdst = -1;
+            time_t then_ts = mktime(&tm);
+            if (then_ts <= 0) return "--";
+            time_t diff = now.timestamp - then_ts;
+            if (diff < 0) diff = 0;
+            if (diff < 60) return str_sprintf("%lds", (long) diff);
+            if (diff < 3600) return str_sprintf("%ldm", (long) (diff / 60));
+            if (diff < 86400) return str_sprintf("%ldh", (long) (diff / 3600));
+            return str_sprintf("%ldd", (long) (diff / 86400));
+          };
+          std::string motion_place = id(last_motion_where).state.empty() ? "--" : id(last_motion_where).state;
+          std::string motion_summary = motion_place + " " + motion_age();
+          float room_temp = id(ac_room_temperature).state;
+          if (!(room_temp == room_temp)) room_temp = id(ac_current_temperature).state;
+          std::string mode_text = id(ac_hvac_mode).state.empty() ? "Off" : id(ac_hvac_mode).state;
+          std::string alarm_text = "Disarmed";
+          Color alarm_color = id(accent_rose);
+          if (id(alarm_status).state == "arming") {
+            alarm_text = "Arming";
+            alarm_color = id(accent_amber);
+          } else if (id(alarm_status).state == "armed_home") {
+            alarm_text = "Home";
+            alarm_color = id(accent_green);
+          } else if (id(alarm_status).state == "armed_away") {
+            alarm_text = "Away";
+            alarm_color = id(accent_green);
+          } else if (id(alarm_status).state == "armed_night") {
+            alarm_text = "Night";
+            alarm_color = id(accent_violet);
+          }
+          int lights_on = 0;
+          if (id(light_1_state).state == "on") lights_on++;
+          if (id(light_2_state).state == "on") lights_on++;
+          if (id(light_3_state).state == "on") lights_on++;
+          if (id(light_4_state).state == "on") lights_on++;
+          if (id(light_5_state).state == "on") lights_on++;
+          if (id(light_6_state).state == "on") lights_on++;
+          auto card = [&](int x, int y, Color accent, const char *icon, const char *title, const std::string &top_right, const std::string &line_1, const std::string &line_2) {
+            it.filled_rectangle(x, y, 136, 102, id(surface_1));
+            it.filled_rectangle(x, y, 4, 102, accent);
+            it.printf(x + 18, y + 12, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "%s", title);
+            it.printf(x + 120, y + 12, id(icon_xs), accent, TextAlign::TOP_RIGHT, "%s", icon);
+            if (!top_right.empty()) it.printf(x + 120, y + 40, id(font_ui_12), accent, TextAlign::TOP_RIGHT, "%s", top_right.c_str());
+            if (!line_1.empty()) it.printf(x + 18, y + 52, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "%s", line_1.c_str());
+            if (!line_2.empty()) it.printf(x + 18, y + 74, id(font_ui_12), id(text_soft), TextAlign::TOP_LEFT, "%s", line_2.c_str());
+          };
+          it.fill(id(ink));
+          card(14, 14, id(accent_blue), "\U000F0717", "Climate", format_temp(room_temp), mode_text, str_sprintf("Target %s", format_temp(id(ac_target_temperature).state).c_str()));
+          it.filled_rectangle(170, 14, 136, 102, id(surface_1));
+          it.filled_rectangle(170, 14, 4, 102, alarm_color);
+          it.printf(188, 18, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Security");
+          it.printf(290, 18, id(icon_xs), alarm_color, TextAlign::TOP_RIGHT, "%s", "\U000F099E");
+          it.printf(188, 42, id(font_ui_14), alarm_text == "Disarmed" ? id(text_soft) : alarm_color, TextAlign::TOP_LEFT, "%s", alarm_text == "Disarmed" ? "Disabled" : alarm_text.c_str());
+          it.printf(188, 76, id(font_ui_12), id(text_soft), TextAlign::TOP_LEFT, "%s", motion_summary.c_str());
+          card(14, 124, id(accent_amber), "\U000F06E8", "Lights", str_sprintf("%d on", lights_on), "", "");
+          card(170, 124, id(accent_violet), "\U000F0493", "More", "", "", "");
+
+      - id: dashboard_more_page
+        lambda: |-
+          std::string route_text = id(output_audio).state ? "External" : "On-box";
+          std::string ip_text = id(ip_addr).state.empty() ? "No IP" : id(ip_addr).state;
+          auto card = [&](int x, int y, Color accent, const char *icon, const char *title, const std::string &line_1, const std::string &line_2) {
+            it.filled_rectangle(x, y, 136, 102, id(surface_1));
+            it.filled_rectangle(x, y, 4, 102, accent);
+            it.printf(x + 18, y + 10, id(font_ui_18), id(text_main), "%s", title);
+            it.printf(x + 118, y + 10, id(icon_xs), accent, TextAlign::TOP_RIGHT, "%s", icon);
+            it.printf(x + 18, y + 50, id(font_ui_18), id(text_main), "%s", line_1.c_str());
+            if (!line_2.empty()) it.printf(x + 18, y + 74, id(font_ui_12), id(text_soft), "%s", line_2.c_str());
+          };
+          it.fill(id(ink));
+          card(14, 14, id(accent_cyan), "\U000F075A", "Media", route_text, id(output_audio).state ? id(ha_media_status).state : "Speaker controls");
+          card(170, 14, id(accent_violet), "\U000F0493", "Settings", "Voice", "Display and idle");
+          card(14, 124, id(accent_green), "\U000F1C6F", "System", ip_text, "Sensors and uptime");
+          card(170, 124, id(accent_amber), "\U000F0B28", "Back", "Return", "Home screen");
+
+      - id: comfort_page
+        lambda: |-
+          float current_temp = id(ac_current_temperature).state;
+          if (!(current_temp == current_temp)) current_temp = id(ac_room_temperature).state;
+          float target_temp = id(ac_target_temperature).state;
+          if (!(target_temp == target_temp)) target_temp = current_temp;
+          float humidity = id(ac_current_humidity).state;
+          if (!(humidity == humidity)) humidity = id(s3humidity).state;
+          std::string mode_text = id(ac_hvac_mode).state.empty() ? "off" : id(ac_hvac_mode).state;
+          std::string fan_text = id(ac_fan_mode).state.empty() ? "--" : id(ac_fan_mode).state;
+          Color mode_color = id(accent_rose);
+          if (mode_text == "cool") mode_color = id(accent_blue);
+          if (mode_text == "heat") mode_color = id(accent_amber);
+          auto chip = [&](int x, int y, const char *label, const std::string &value, Color accent) {
+            it.filled_rectangle(x, y, 144, 28, id(surface_1));
+            it.filled_rectangle(x, y, 4, 28, accent);
+            it.printf(x + 14, y + 8, id(font_ui_14), id(text_main), "%s", label);
+            it.printf(x + 132, y + 8, id(font_ui_14), accent, TextAlign::TOP_RIGHT, "%s", value.c_str());
+          };
+          auto mode_button = [&](int x, const char *label, Color accent, bool active) {
+            it.filled_rectangle(x, 140, 88, 40, active ? id(surface_2) : id(surface_1));
+            it.filled_rectangle(x, 140, 88, 4, active ? accent : id(surface_2));
+            it.printf(x + 44, 161, id(font_ui_16), active ? accent : id(text_main), TextAlign::CENTER, "%s", label);
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Climate");
+          it.printf(302, 2, id(font_ui_16), mode_color, TextAlign::TOP_RIGHT, "%s", mode_text.c_str());
+          it.filled_rectangle(18, 34, 124, 90, id(surface_1));
+          it.filled_rectangle(18, 34, 124, 4, mode_color);
+          it.printf(32, 46, id(font_ui_14), id(text_soft), TextAlign::TOP_LEFT, "Room");
+          it.printf(32, 82, id(font_data_28), id(text_main), TextAlign::TOP_LEFT, "%.0fC", current_temp);
+          chip(154, 34, "Target", str_sprintf("%.0fC", target_temp), id(accent_blue));
+          chip(154, 66, "Fan", fan_text, id(accent_violet));
+          chip(154, 98, "Humidity", str_sprintf("%.0f%%", humidity), id(accent_teal));
+          mode_button(18, "Off", id(accent_rose), mode_text == "off");
+          mode_button(116, "Cool", id(accent_blue), mode_text == "cool");
+          mode_button(214, "Heat", id(accent_amber), mode_text == "heat");
+          it.filled_rectangle(18, 188, 284, 44, id(surface_1));
+          it.filled_rectangle(18, 188, 284, 4, id(accent_amber));
+          it.filled_rectangle(18, 192, 64, 36, id(surface_2));
+          it.printf(50, 210, id(icon_sm), id(accent_blue), TextAlign::CENTER, "\U000F0B26");
+          it.printf(160, 212, id(font_title_24), id(text_main), TextAlign::CENTER, "%.0fC", target_temp);
+          it.filled_rectangle(238, 192, 64, 36, id(surface_2));
+          it.printf(270, 210, id(icon_sm), id(accent_blue), TextAlign::CENTER, "\U000F0B2C");
+
+      - id: automation_page
+        lambda: |-
+          auto row = [&](int y, Color accent, const char *icon, const char *title, const char *desc) {
+            it.filled_rectangle(18, y, 284, 58, id(surface_1));
+            it.filled_rectangle(18, y, 4, 58, accent);
+            it.printf(46, y + 29, id(icon_xs), accent, TextAlign::CENTER, "%s", icon);
+            it.printf(74, y + 20, id(font_ui_18), id(text_main), "%s", title);
+            it.printf(74, y + 39, id(font_ui_12), id(text_soft), "%s", desc);
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 6, id(font_ui_18), id(text_main), "Automation");
+          row(44, id(accent_green), "\U000F0FCE", "Scenes", "Room presets and scenes");
+          row(111, id(accent_violet), "\U000F1322", "Macros", "Scripts and helpers");
+          row(178, id(accent_amber), "\U000F0B28", "Back", "Return to settings");
+
+      - id: lights_page
+        lambda: |-
+          auto state_label = [&](const std::string &s) -> std::string {
+            if (s == "on") return "ON";
+            if (s == "off") return "OFF";
+            return "LINK";
+          };
+          auto light_tile = [&](int x, int y, const char *label, const std::string &state) {
+            bool on = state == "on";
+            Color accent = on ? id(accent_amber) : id(surface_2);
+            it.filled_rectangle(x, y, 136, 84, id(surface_1));
+            it.filled_rectangle(x, y, 4, 84, accent);
+            it.printf(x + 28, y + 22, id(icon_xs), on ? id(accent_amber) : id(text_soft), TextAlign::CENTER, "%s", on ? "\U000F06E8" : "\U000F0336");
+            it.printf(x + 52, y + 14, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "%s", label);
+            it.printf(x + 122, y + 46, id(font_ui_14), on ? id(accent_amber) : id(text_soft), TextAlign::TOP_RIGHT, "%s", state_label(state).c_str());
+          };
+          auto nav_tile = [&](int x, int y, Color accent, const char *icon, const char *title, const char *desc) {
+            it.filled_rectangle(x, y, 136, 84, id(surface_1));
+            it.filled_rectangle(x, y, 4, 84, accent);
+            it.printf(x + 28, y + 22, id(icon_xs), accent, TextAlign::CENTER, "%s", icon);
+            it.printf(x + 52, y + 14, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "%s", title);
+            if (desc[0] != '\0') it.printf(x + 52, y + 46, id(font_ui_12), id(text_soft), TextAlign::TOP_LEFT, "%s", desc);
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Lights");
+          light_tile(14, 44, "${light_1_label}", id(light_1_state).state);
+          light_tile(170, 44, "${light_2_label}", id(light_2_state).state);
+          light_tile(14, 144, "${light_3_label}", id(light_3_state).state);
+          nav_tile(170, 144, id(accent_blue), "\U000F0142", "Next", "");
+
+      - id: lights_page_2
+        lambda: |-
+          auto tile = [&](int x, int y, Color accent, const char *icon, const char *title, const char *value) {
+            it.filled_rectangle(x, y, 136, 58, id(surface_1));
+            it.filled_rectangle(x, y, 4, 58, accent);
+            it.printf(x + 24, y + 18, id(icon_xs), accent, TextAlign::CENTER, "%s", icon);
+            it.printf(x + 48, y + 10, id(font_ui_16), id(text_main), TextAlign::TOP_LEFT, "%s", title);
+            if (value[0] != '\0') it.printf(x + 122, y + 30, id(font_ui_14), accent, TextAlign::TOP_RIGHT, "%s", value);
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Lights");
+          tile(14, 40, id(light_4_state).state == "on" ? id(accent_amber) : id(surface_2), id(light_4_state).state == "on" ? "\U000F06E8" : "\U000F0336", "${light_4_label}", id(light_4_state).state == "on" ? "ON" : "LINK");
+          tile(170, 40, id(light_5_state).state == "on" ? id(accent_amber) : id(surface_2), id(light_5_state).state == "on" ? "\U000F06E8" : "\U000F0336", "${light_5_label}", id(light_5_state).state == "on" ? "ON" : "LINK");
+          tile(14, 106, id(light_6_state).state == "on" ? id(accent_amber) : id(surface_2), id(light_6_state).state == "on" ? "\U000F06E8" : "\U000F0336", "${light_6_label}", id(light_6_state).state == "on" ? "ON" : "LINK");
+          tile(170, 106, id(accent_amber), "\U000F0B28", "Back", "");
+          tile(14, 172, id(accent_teal), "\U000F1A12", "Home", "");
+          tile(170, 172, id(accent_blue), "\U000F1C6F", "System", "");
+
+      - id: light_preferences_page
+        lambda: |-
+          auto selected_label = [&]() -> std::string {
+            if (id(selected_light_slot) == 1) return std::string("${light_1_label}");
+            if (id(selected_light_slot) == 2) return std::string("${light_2_label}");
+            if (id(selected_light_slot) == 3) return std::string("${light_3_label}");
+            if (id(selected_light_slot) == 4) return std::string("${light_4_label}");
+            if (id(selected_light_slot) == 5) return std::string("${light_5_label}");
+            return std::string("${light_6_label}");
+          };
+          auto bright_button = [&](int x, int pct) {
+            it.filled_rectangle(x, 70, 64, 54, id(surface_1));
+            it.filled_rectangle(x, 70, 64, 4, id(accent_amber));
+            it.printf(x + 32, 98, id(font_ui_16), id(text_main), TextAlign::CENTER, "%d%%", pct);
+          };
+          auto color_button = [&](int x, Color accent, const char *label) {
+            it.filled_rectangle(x, 148, 64, 54, id(surface_1));
+            it.filled_rectangle(x, 148, 64, 4, accent);
+            it.filled_circle(x + 18, 176, 8, accent);
+            it.printf(x + 42, 176, id(font_ui_12), id(text_main), TextAlign::CENTER, "%s", label);
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(icon_xs), id(text_soft), "\U000F0B28");
+          it.printf(40, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "%s", selected_label().c_str());
+          it.printf(18, 38, id(font_ui_14), id(text_soft), TextAlign::TOP_LEFT, "Brightness");
+          bright_button(14, 1);
+          bright_button(90, 25);
+          bright_button(166, 50);
+          bright_button(242, 100);
+          it.printf(18, 126, id(font_ui_14), id(text_soft), TextAlign::TOP_LEFT, "Color");
+          color_button(14, id(accent_amber), "Amber");
+          color_button(90, id(accent_red), "Red");
+          color_button(166, id(accent_violet), "Purple");
+          color_button(242, id(white), "White");
+
+      - id: scenes_page
+        lambda: |-
+          auto tile = [&](int x, int y, const char *label) {
+            it.filled_rectangle(x, y, 136, 58, id(surface_1));
+            it.filled_rectangle(x, y, 4, 58, id(accent_green));
+            it.printf(x + 22, y + 24, id(icon_xs), id(accent_green), "\U000F0FCE");
+            it.printf(x + 48, y + 14, id(font_ui_16), id(text_main), "%s", label);
+            it.printf(x + 122, y + 34, id(font_ui_14), id(accent_green), TextAlign::TOP_RIGHT, "Run");
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Scenes");
+          tile(14, 44, "${scene_1_label}");
+          tile(170, 44, "${scene_2_label}");
+          tile(14, 108, "${scene_3_label}");
+          tile(170, 108, "${scene_4_label}");
+          tile(14, 172, "${scene_5_label}");
+          tile(170, 172, "${scene_6_label}");
+
+      - id: macros_page
+        lambda: |-
+          auto tile = [&](int x, int y, const char *label) {
+            it.filled_rectangle(x, y, 136, 58, id(surface_1));
+            it.filled_rectangle(x, y, 4, 58, id(accent_violet));
+            it.printf(x + 22, y + 24, id(icon_xs), id(accent_violet), "\U000F1322");
+            it.printf(x + 48, y + 14, id(font_ui_16), id(text_main), "%s", label);
+            it.printf(x + 122, y + 34, id(font_ui_14), id(accent_violet), TextAlign::TOP_RIGHT, "Run");
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Macros");
+          tile(14, 44, "${macro_1_label}");
+          tile(170, 44, "${macro_2_label}");
+          tile(14, 108, "${macro_3_label}");
+          tile(170, 108, "${macro_4_label}");
+          tile(14, 172, "${macro_5_label}");
+          tile(170, 172, "${macro_6_label}");
+
+      - id: media_page
+        lambda: |-
+          auto button = [&](int x, int y, const char *icon, const char *label, Color accent) {
+            it.filled_rectangle(x, y, 88, 66, id(surface_1));
+            it.filled_rectangle(x, y, 4, 66, accent);
+            it.printf(x + 44, y + 22, id(icon_xs), accent, TextAlign::CENTER, "%s", icon);
+            it.printf(x + 44, y + 48, id(font_ui_14), id(text_main), TextAlign::CENTER, "%s", label);
+          };
+          std::string title = id(output_audio).state ? id(ha_media_title).state : "On-box audio";
+          if (title.empty()) title = id(output_audio).state ? "External player" : "On-box audio";
+          if (title.length() > 24) title = title.substr(0, 21) + "...";
+          std::string status = id(output_audio).state ? id(ha_media_status).state : (id(media_state) ? "playing" : "idle");
+          std::string route_label = id(output_audio).state ? "External route" : "Local route";
+          std::string volume = str_sprintf("%d%%", 50 + (id(speaker_volume) * 5));
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Media");
+          it.filled_rectangle(14, 44, 292, 52, id(surface_1));
+          it.filled_rectangle(14, 44, 292, 4, id(output_audio).state ? id(accent_amber) : id(accent_blue));
+          it.printf(28, 54, id(font_ui_12), id(text_soft), "%s", route_label.c_str());
+          it.printf(28, 74, id(font_ui_18), id(text_main), "%s", title.c_str());
+          it.printf(292, 54, id(font_ui_14), id(accent_cyan), TextAlign::TOP_RIGHT, "%s", status.c_str());
+          it.printf(292, 74, id(font_ui_14), id(text_soft), TextAlign::TOP_RIGHT, "%s", id(output_audio).state ? "Tap header to change" : volume.c_str());
+          if (id(output_audio).state) {
+            button(14, 106, "\U000F04AE", "Prev", id(accent_cyan));
+            button(116, 106, "\U000F040E", "Play", id(accent_green));
+            button(218, 106, "\U000F04AD", "Next", id(accent_cyan));
+            button(14, 176, "\U000F075E", "Vol -", id(accent_blue));
+            button(116, 176, id(ext_media_mute).state ? "\U000F0581" : "\U000F057E", id(ext_media_mute).state ? "Muted" : "Mute", id(ext_media_mute).state ? id(accent_rose) : id(accent_green));
+            button(218, 176, "\U000F075D", "Vol +", id(accent_blue));
+          } else {
+            button(14, 106, "\U000F075E", "Vol -", id(accent_blue));
+            button(116, 106, id(media_state) ? "\U000F03E4" : "\U000F040A", id(media_state) ? "Stop" : "Play", id(accent_green));
+            button(218, 106, "\U000F075D", "Vol +", id(accent_blue));
+            button(14, 176, "\U000F0502", "Route", id(accent_cyan));
+            button(116, 176, id(media_mute).state ? "\U000F0581" : "\U000F057E", id(media_mute).state ? "Muted" : "Mute", id(media_mute).state ? id(accent_rose) : id(accent_green));
+            button(218, 176, "\U000F0238", "Boost", id(accent_violet));
+          }
+
+      - id: security_page
+        lambda: |-
+          Color status_color = id(accent_rose);
+          const char *status_icon = "\U000F099E";
+          std::string status_text = "Disarmed";
+          if (id(alarm_status).state == "arming") {
+            status_color = id(accent_amber);
+            status_text = "Arming";
+          } else if (id(alarm_status).state == "armed_home") {
+            status_color = id(accent_green);
+            status_text = "Home";
+          } else if (id(alarm_status).state == "armed_away") {
+            status_color = id(accent_green);
+            status_icon = "\U000F099D";
+            status_text = "Away";
+          } else if (id(alarm_status).state == "armed_night") {
+            status_color = id(accent_violet);
+            status_icon = "\U000F1828";
+            status_text = "Night";
+          }
+          auto action = [&](int x, int y, const char *icon, const char *label, Color accent) {
+            it.filled_rectangle(x, y, 136, 54, id(surface_1));
+            it.filled_rectangle(x, y, 4, 54, accent);
+            it.printf(x + 26, y + 28, id(icon_xs), accent, TextAlign::CENTER, "%s", icon);
+            it.printf(x + 50, y + 16, id(font_ui_16), id(text_main), TextAlign::TOP_LEFT, "%s", label);
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Security");
+          it.filled_rectangle(14, 44, 292, 68, id(surface_1));
+          it.filled_rectangle(14, 44, 292, 4, status_color);
+          it.printf(44, 78, id(icon_sm), status_color, TextAlign::CENTER, "%s", status_icon);
+          it.printf(86, 52, id(font_ui_12), id(text_soft), TextAlign::TOP_LEFT, "Alarm state");
+          it.printf(86, 72, id(font_title_24), status_color, TextAlign::TOP_LEFT, "%s", status_text.c_str());
+          action(14, 124, "\U000F068A", "Arm Home", id(accent_green));
+          action(170, 124, "\U000F099D", "Arm Away", id(accent_green));
+          action(14, 186, "\U000F1828", "Arm Night", id(accent_violet));
+          action(170, 186, "\U000F099E", "Disarm", id(accent_rose));
+
+      - id: settings_page
+        lambda: |-
+          auto card = [&](int x, int y, Color accent, const char *icon, const char *title, const char *desc) {
+            it.filled_rectangle(x, y, 136, 58, id(surface_1));
+            it.filled_rectangle(x, y, 4, 58, accent);
+            it.printf(x + 18, y + 10, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "%s", title);
+            it.printf(x + 118, y + 10, id(icon_xs), accent, TextAlign::TOP_RIGHT, "%s", icon);
+            it.printf(x + 18, y + 34, id(font_ui_12), id(text_soft), TextAlign::TOP_LEFT, "%s", desc);
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Settings");
+          card(14, 44, id(accent_cyan), "\U000F036C", "Voice", "Wake and replies");
+          card(170, 44, id(accent_blue), "\U000F08D6", "Display", "Brightness clock");
+          card(14, 110, id(accent_green), "\U000F0502", "Idle", "Screensaver");
+          card(170, 110, id(accent_teal), "\U000F16BD", "Network", "WiFi and IP");
+          card(14, 176, id(accent_amber), "\U000F1C6F", "System", "Sensors uptime");
+          card(170, 176, id(accent_violet), "\U000F1322", "Automation", "Scenes macros");
+
+      - id: voice_settings_page
+        lambda: |-
+          auto toggle_row = [&](int y, const char *label, bool on, Color accent) {
+            it.filled_rectangle(12, y, 296, 32, id(surface_1));
+            it.filled_rectangle(12, y, 4, 32, accent);
+            it.printf(24, y + 8, id(font_ui_14), id(text_main), TextAlign::TOP_LEFT, "%s", label);
+            it.printf(220, y + 9, id(font_ui_12), on ? accent : id(text_soft), TextAlign::TOP_RIGHT, "%s", on ? "On" : "Off");
+            it.filled_rectangle(248, y + 7, 42, 16, on ? accent : id(surface_2));
+            it.filled_rectangle(on ? 270 : 250, y + 9, 16, 12, id(white));
+          };
+          auto value_row = [&](int y, const char *label, const std::string &value, Color accent) {
+            it.filled_rectangle(12, y, 296, 32, id(surface_1));
+            it.filled_rectangle(12, y, 4, 32, accent);
+            it.printf(24, y + 8, id(font_ui_14), id(text_main), TextAlign::TOP_LEFT, "%s", label);
+            it.printf(246, y + 9, id(font_ui_12), accent, TextAlign::TOP_RIGHT, "%s", value.c_str());
+            it.printf(286, y + 16, id(icon_xs), accent, TextAlign::CENTER, "\U000F0142");
+          };
+          auto action_row = [&](int y, const char *label, const char *value, Color accent) {
+            it.filled_rectangle(12, y, 296, 32, id(surface_1));
+            it.filled_rectangle(12, y, 4, 32, accent);
+            it.printf(24, y + 8, id(font_ui_14), id(text_main), TextAlign::TOP_LEFT, "%s", label);
+            it.printf(246, y + 9, id(font_ui_12), accent, TextAlign::TOP_RIGHT, "%s", value);
+            it.printf(286, y + 16, id(icon_xs), accent, TextAlign::CENTER, "\U000F036D");
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(icon_xs), id(text_soft), "\U000F0B28");
+          it.printf(40, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Voice");
+          value_row(38, "Wake path", id(wakeword_location).state.empty() ? "Unset" : id(wakeword_location).state, id(accent_cyan));
+          toggle_row(72, "Mute spoken replies", id(mute_response_switch).state, id(accent_amber));
+          toggle_row(106, "Play wake tone", id(wake_sound).state, id(accent_blue));
+          toggle_row(140, "Show conversation", id(display_conversation).state, id(accent_teal));
+          toggle_row(174, "Mute assistant", id(mute_switch).state, id(accent_rose));
+          action_row(208, "Voice test", "Hold to talk", id(accent_green));
+
+      - id: saver_settings_page
+        lambda: |-
+          auto toggle_row = [&](int y, const char *label, bool on, Color accent) {
+            it.filled_rectangle(12, y, 296, 32, id(surface_1));
+            it.filled_rectangle(12, y, 4, 32, accent);
+            it.printf(24, y + 8, id(font_ui_14), id(text_main), TextAlign::TOP_LEFT, "%s", label);
+            it.printf(220, y + 9, id(font_ui_12), on ? accent : id(text_soft), TextAlign::TOP_RIGHT, "%s", on ? "On" : "Off");
+            it.filled_rectangle(248, y + 7, 42, 16, on ? accent : id(surface_2));
+            it.filled_rectangle(on ? 270 : 250, y + 9, 16, 12, id(white));
+          };
+          auto action_row = [&](int y, const char *label, const char *value, Color accent) {
+            it.filled_rectangle(12, y, 296, 32, id(surface_1));
+            it.filled_rectangle(12, y, 4, 32, accent);
+            it.printf(24, y + 8, id(font_ui_14), id(text_main), TextAlign::TOP_LEFT, "%s", label);
+            it.printf(246, y + 9, id(font_ui_12), accent, TextAlign::TOP_RIGHT, "%s", value);
+            it.printf(286, y + 16, id(icon_xs), accent, TextAlign::CENTER, "\U000F0142");
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(icon_xs), id(text_soft), "\U000F0B28");
+          it.printf(40, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Idle");
+          action_row(40, "Timeout controls", "Open", id(accent_blue));
+          toggle_row(76, "Enable screensaver", id(s_saver).state, id(accent_green));
+          toggle_row(112, "Wake on presence", id(s_saver_presc).state, id(accent_teal));
+          toggle_row(148, "Blank after dim", id(s_saver_mode).state, id(accent_amber));
+          action_row(184, "Manual preview", "Start", id(accent_violet));
+
+      - id: display_settings_page
+        lambda: |-
+          auto toggle_row = [&](int y, const char *label, bool on, Color accent) {
+            it.filled_rectangle(12, y, 296, 32, id(surface_1));
+            it.filled_rectangle(12, y, 4, 32, accent);
+            it.printf(24, y + 8, id(font_ui_14), id(text_main), TextAlign::TOP_LEFT, "%s", label);
+            it.printf(220, y + 9, id(font_ui_12), on ? accent : id(text_soft), TextAlign::TOP_RIGHT, "%s", on ? "On" : "Off");
+            it.filled_rectangle(248, y + 7, 42, 16, on ? accent : id(surface_2));
+            it.filled_rectangle(on ? 270 : 250, y + 9, 16, 12, id(white));
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(icon_xs), id(text_soft), "\U000F0B28");
+          it.printf(40, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Display");
+          toggle_row(40, "External media output", id(output_audio).state, id(accent_cyan));
+          it.filled_rectangle(12, 76, 296, 56, id(surface_1));
+          it.filled_rectangle(12, 76, 4, 56, id(accent_amber));
+          it.printf(24, 86, id(font_ui_14), id(text_main), TextAlign::TOP_LEFT, "Brightness");
+          it.filled_rectangle(172, 84, 40, 30, id(surface_2));
+          it.printf(192, 99, id(icon_xs), id(accent_amber), TextAlign::CENTER, "\U000F0B26");
+          it.filled_rectangle(218, 84, 44, 30, id(surface_0));
+          it.printf(240, 99, id(font_ui_14), id(text_main), TextAlign::CENTER, "%.0f", id(s_default_brightness).state);
+          it.filled_rectangle(268, 84, 40, 30, id(surface_2));
+          it.printf(288, 99, id(icon_xs), id(accent_amber), TextAlign::CENTER, "\U000F0B2C");
+          it.filled_rectangle(12, 144, 296, 32, id(surface_1));
+          it.filled_rectangle(12, 144, 4, 32, id(accent_blue));
+          it.printf(24, 152, id(font_ui_14), id(text_main), TextAlign::TOP_LEFT, "Clock mode");
+          it.printf(246, 153, id(font_ui_12), id(accent_blue), TextAlign::TOP_RIGHT, "%s", id(time_display_format).state.c_str());
+          it.printf(286, 160, id(icon_xs), id(accent_blue), TextAlign::CENTER, "\U000F0142");
+
+      - id: timeout_settings_page
+        lambda: |-
+          auto box = [&](int x, int y, const char *title, float value, Color accent) {
+            it.filled_rectangle(x, y, 136, 72, id(surface_1));
+            it.filled_rectangle(x, y, 4, 72, accent);
+            it.printf(x + 14, y + 16, id(font_ui_14), id(text_main), "%s", title);
+            it.printf(x + 68, y + 48, id(font_data_18), id(text_main), TextAlign::CENTER, "%.0f", value);
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(icon_xs), id(text_soft), "\U000F0B28");
+          it.printf(40, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Timeouts");
+          box(12, 42, "Saver delay", id(s_saver_delay).state, id(accent_blue));
+          box(172, 42, "Dim level", id(s_saver_brightness).state, id(accent_violet));
+          box(12, 126, "Blank delay", id(s_saver_blank_delay).state, id(accent_amber));
+          it.filled_rectangle(172, 126, 136, 72, id(surface_1));
+          it.filled_rectangle(172, 126, 4, 72, id(accent_green));
+          it.printf(240, 150, id(icon_sm), id(accent_green), TextAlign::CENTER, "\U000F0502");
+          it.printf(240, 176, id(font_ui_14), id(text_main), TextAlign::CENTER, "Preview");
+
+      - id: network_page
+        lambda: |-
+          auto row = [&](int y, const char *label, const std::string &value, Color accent) {
+            it.filled_rectangle(12, y, 296, 34, id(surface_1));
+            it.filled_rectangle(12, y, 4, 34, accent);
+            it.printf(24, y + 9, id(font_ui_14), id(text_main), TextAlign::TOP_LEFT, "%s", label);
+            it.printf(292, y + 10, id(font_ui_12), accent, TextAlign::TOP_RIGHT, "%s", value.c_str());
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(icon_xs), id(text_soft), "\U000F0B28");
+          it.printf(40, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Network");
+          row(44, "SSID", id(connected_ssid).state.empty() ? "--" : id(connected_ssid).state, id(accent_blue));
+          row(84, "BSSID", id(connected_bssid).state.empty() ? "--" : id(connected_bssid).state, id(accent_teal));
+          row(124, "IP", id(ip_addr).state.empty() ? "--" : id(ip_addr).state, id(accent_green));
+          row(164, "Signal", str_sprintf("%.0f%%", id(wifi_percent).state), id(accent_amber));
+          row(204, "API", id(api_connection) ? "Connected" : "Offline", id(accent_violet));
+
+      - id: system_page
+        lambda: |-
+          auto format_temp = [&](float value) -> std::string {
+            return str_sprintf("%.1fC", value);
+          };
+          auto format_humidity = [&](float value) -> std::string {
+            return str_sprintf("%.0f%%", value);
+          };
+          auto row = [&](int y, const char *label, const std::string &value, Color accent) {
+            it.filled_rectangle(12, y, 296, 34, id(surface_1));
+            it.filled_rectangle(12, y, 4, 34, accent);
+            it.printf(24, y + 9, id(font_ui_14), id(text_main), TextAlign::TOP_LEFT, "%s", label);
+            it.printf(292, y + 10, id(font_ui_12), accent, TextAlign::TOP_RIGHT, "%s", value.c_str());
+          };
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(icon_xs), id(text_soft), "\U000F0B28");
+          it.printf(40, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "System");
+          int y = 36;
+          row(y, "Uptime", id(up_sens_text).state.empty() ? "--" : id(up_sens_text).state, id(accent_green));
+          y += 40;
+          if (id(ac_room_temperature).state == id(ac_room_temperature).state) {
+            row(y, "Room", format_temp(id(ac_room_temperature).state), id(accent_blue));
+            y += 40;
+          }
+          if (id(s3temp).state == id(s3temp).state) {
+            row(y, "Box temp", format_temp(id(s3temp).state), id(accent_teal));
+            y += 40;
+          }
+          if (id(s3humidity).state == id(s3humidity).state) {
+            row(y, "Humidity", format_humidity(id(s3humidity).state), id(accent_amber));
+            y += 40;
+          }
+          row(y, "IP", id(ip_addr).state.empty() ? "--" : id(ip_addr).state, id(accent_cyan));
+          y += 40;
+          row(y, "Signal", str_sprintf("%.0f%%", id(wifi_percent).state), id(accent_violet));
+          y += 40;
+          if (y <= 196) row(y, "API", id(api_connection) ? "Connected" : "Offline", id(accent_teal));
+
+      - id: alarm_keypad_page
+        lambda: |-
+          std::string mask(id(current_pin).length(), '*');
+          std::string action_label = "Enter code";
+          const char *action_icon = "\U000F099E";
+          Color accent = id(accent_rose);
+          if (id(pending_alarm_action) == "arm_home") {
+            action_label = "Arm home";
+            action_icon = "\U000F068A";
+            accent = id(accent_green);
+          } else if (id(pending_alarm_action) == "arm_away") {
+            action_label = "Arm away";
+            action_icon = "\U000F099D";
+            accent = id(accent_green);
+          } else if (id(pending_alarm_action) == "arm_night") {
+            action_label = "Arm night";
+            action_icon = "\U000F1828";
+            accent = id(accent_violet);
+          } else if (id(pending_alarm_action) == "disarm") {
+            action_label = "Disarm";
+            action_icon = "\U000F099E";
+            accent = id(accent_rose);
+          }
+          it.fill(id(ink));
+          it.filled_rectangle(0, 0, 320, 28, id(surface_1));
+          it.filled_rectangle(0, 27, 320, 1, id(line));
+          it.printf(18, 2, id(icon_xs), id(text_soft), "\U000F0B28");
+          it.printf(40, 2, id(font_ui_18), id(text_main), TextAlign::TOP_LEFT, "Alarm keypad");
+          it.printf(306, 2, id(font_ui_14), accent, TextAlign::TOP_RIGHT, "%s", action_label.c_str());
+          for (int row = 0; row < 3; row++) {
+            for (int col = 0; col < 3; col++) {
+              int number = row * 3 + col + 1;
+              int x = 12 + col * 56;
+              int y = 44 + row * 46;
+              it.filled_rectangle(x, y, 48, 38, id(surface_1));
+              it.rectangle(x, y, 48, 38, id(line));
+              char num_str[2];
+              snprintf(num_str, sizeof(num_str), "%d", number);
+              it.printf(x + 24, y + 22, id(font_ui_18), id(text_main), TextAlign::CENTER, "%s", num_str);
+            }
+          }
+          it.filled_rectangle(68, 182, 48, 38, id(surface_1));
+          it.rectangle(68, 182, 48, 38, id(line));
+          it.printf(92, 204, id(font_ui_18), id(text_main), TextAlign::CENTER, "0");
+          it.filled_rectangle(188, 44, 120, 40, id(surface_1));
+          it.rectangle(188, 44, 120, 40, accent);
+          it.filled_rectangle(188, 44, 120, 3, accent);
+          it.printf(200, 60, id(icon_xs), accent, "%s", action_icon);
+          it.printf(298, 60, id(font_ui_14), id(text_main), TextAlign::TOP_RIGHT, "%s", action_label.c_str());
+          it.filled_rectangle(188, 92, 120, 34, id(surface_1));
+          it.rectangle(188, 92, 120, 34, id(line));
+          it.printf(200, 103, id(font_ui_12), id(text_soft), "PIN");
+          it.printf(298, 103, id(font_ui_14), id(text_main), TextAlign::TOP_RIGHT, "%s", mask.c_str());
+          it.filled_rectangle(188, 136, 120, 38, id(surface_1));
+          it.rectangle(188, 136, 120, 38, id(line));
+          it.printf(248, 160, id(font_ui_14), id(text_main), TextAlign::CENTER, "Submit");
+          it.filled_rectangle(188, 182, 120, 38, id(surface_1));
+          it.rectangle(188, 182, 120, 38, id(line));
+          it.printf(248, 206, id(font_ui_14), id(text_main), TextAlign::CENTER, "Clear");
+
+      - id: timer_page
+        lambda: |-
+          Color accent = id(time_remaining_0).state == "0:00:00" ? id(text_soft) : id(accent_amber);
+          it.fill(id(ink));
+          it.filled_rectangle(28, 24, 264, 192, id(surface_1));
+          it.rectangle(28, 24, 264, 192, id(line));
+          it.filled_rectangle(28, 24, 264, 4, accent);
+          it.printf(160, 60, id(font_title_24), id(text_main), TextAlign::CENTER, "Active timer");
+          it.printf(160, 112, id(icon_md), accent, TextAlign::CENTER, "\U000F0150");
+          it.printf(160, 170, id(font_data_28), id(text_main), TextAlign::CENTER, "%s", id(time_remaining_0).state.c_str());
+
+      - id: timer_finished_page
+        lambda: |-
+          Color accent = (id(ui_tick) % 2 == 0) ? id(accent_amber) : id(accent_rose);
+          it.fill(id(ink));
+          it.filled_rectangle(32, 28, 256, 184, id(surface_1));
+          it.rectangle(32, 28, 256, 184, accent);
+          it.filled_rectangle(32, 28, 256, 4, accent);
+          it.printf(160, 72, id(font_title_24), id(text_main), TextAlign::CENTER, "Timer finished");
+          it.printf(160, 132, id(icon_lg), accent, TextAlign::CENTER, "\U000F0150");
+          it.printf(160, 194, id(font_ui_14), id(text_soft), TextAlign::CENTER, "Tap anywhere to dismiss");
+
+      - id: notification_page
+        lambda: |-
+          it.fill(id(ink));
+          it.filled_rectangle(18, 18, 284, 204, id(surface_1));
+          it.rectangle(18, 18, 284, 204, id(line));
+          it.filled_rectangle(18, 18, 284, 4, id(accent_cyan));
+          it.printf(36, 48, id(font_title_20), id(text_main), "Notification");
+          const char *text = id(notification_text).state.c_str();
+          int max_chars = 22;
+          int y = 84;
+          std::vector<std::string> lines;
+          std::string current;
+          for (const char *p = text; *p != '\0'; ++p) {
+            if (*p == '\n' || current.length() >= max_chars) {
+              lines.push_back(current);
+              current.clear();
+              if (*p != '\n') current += *p;
+            } else {
+              current += *p;
+            }
+          }
+          if (!current.empty()) lines.push_back(current);
+          for (const auto &line : lines) {
+            it.printf(160, y, id(font_ui_16), id(text_main), TextAlign::CENTER, "%s", line.c_str());
+            y += 22;
+          }
+
+      - id: assistant_listening_page
+        lambda: |-
+          int phase = id(ui_tick) % 4;
+          int h1 = 20 + ((phase == 0 || phase == 2) ? 18 : 6);
+          int h2 = 20 + ((phase == 1 || phase == 3) ? 18 : 6);
+          int h3 = 20 + ((phase == 2) ? 18 : 6);
+          it.fill(id(ink));
+          it.printf(160, 72, id(icon_lg), id(accent_cyan), TextAlign::CENTER, "\U000F036C");
+          it.printf(160, 140, id(font_title_24), id(text_main), TextAlign::CENTER, "Listening");
+          it.printf(160, 166, id(font_ui_14), id(text_soft), TextAlign::CENTER, "Speak naturally");
+          it.filled_rectangle(122, 212 - h1, 16, h1, id(accent_blue));
+          it.filled_rectangle(152, 212 - h2, 16, h2, id(accent_teal));
+          it.filled_rectangle(182, 212 - h3, 16, h3, id(accent_green));
+
+      - id: assistant_thinking_page
+        lambda: |-
+          int phase = id(ui_tick) % 3;
+          it.fill(id(ink));
+          it.printf(160, 68, id(icon_lg), id(accent_blue), TextAlign::CENTER, "\U000F1322");
+          it.printf(160, 136, id(font_title_24), id(text_main), TextAlign::CENTER, "Thinking");
+          for (int i = 0; i < 3; i++) {
+            Color dot = i == phase ? id(accent_green) : id(surface_2);
+            it.filled_rectangle(124 + (i * 26), 160, 14, 14, dot);
+          }
+          if (id(display_conversation).state) {
+            it.filled_rectangle(10, 188, 300, 34, id(surface_1));
+            it.rectangle(10, 188, 300, 34, id(line));
+            it.printf(18, 200, id(font_ui_14), id(text_main), "%s", id(text_request).state.c_str());
+          }
+
+      - id: assistant_replying_page
+        lambda: |-
+          int phase = id(ui_tick) % 4;
+          int a = 14 + ((phase == 0 || phase == 2) ? 16 : 4);
+          int b = 14 + ((phase == 1 || phase == 3) ? 16 : 4);
+          int c = 14 + ((phase == 2) ? 16 : 4);
+          it.fill(id(ink));
+          it.printf(160, 56, id(icon_lg), id(accent_green), TextAlign::CENTER, "\U000F057E");
+          it.printf(160, 118, id(font_title_24), id(text_main), TextAlign::CENTER, "Replying");
+          it.filled_rectangle(124, 150 - a, 14, a, id(accent_blue));
+          it.filled_rectangle(153, 150 - b, 14, b, id(accent_teal));
+          it.filled_rectangle(182, 150 - c, 14, c, id(accent_green));
+          if (id(display_conversation).state) {
+            it.filled_rectangle(10, 166, 300, 22, id(surface_1));
+            it.rectangle(10, 166, 300, 22, id(line));
+            it.printf(18, 174, id(font_ui_12), id(text_soft), "%s", id(text_request).state.c_str());
+            it.filled_rectangle(10, 194, 300, 30, id(surface_2));
+            it.rectangle(10, 194, 300, 30, id(line));
+            it.printf(18, 205, id(font_ui_12), id(text_main), "%s", id(text_response).state.c_str());
+          }
+
+      - id: assistant_error_page
+        lambda: |-
+          it.fill(id(ink));
+          it.printf(160, 72, id(icon_lg), id(accent_red), TextAlign::CENTER, "\U000F087B");
+          it.printf(160, 142, id(font_title_24), id(accent_red), TextAlign::CENTER, "Voice path error");
+          it.printf(160, 170, id(font_ui_14), id(text_soft), TextAlign::CENTER, "Check WiFi, HA or the pipeline");
+
+      - id: boot_page
+        lambda: |-
+          int phase = id(ui_tick) % 3;
+          it.fill(id(ink));
+          it.printf(160, 74, id(icon_lg), id(accent_blue), TextAlign::CENTER, "\U000F1A12");
+          it.printf(160, 146, id(font_title_24), id(text_main), TextAlign::CENTER, "Booting panel");
+          it.printf(160, 172, id(font_ui_14), id(text_soft), TextAlign::CENTER, "audio path, wake path and control deck");
+          for (int i = 0; i < 3; i++) {
+            it.filled_rectangle(118 + (i * 28), 202, 18, 12, i == phase ? id(accent_green) : id(surface_2));
+          }
+
+      - id: saver_page
+        lambda: |-
+          it.fill(Color::BLACK);
+          auto now = id(ha_time).now();
+          const char *days[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+          const char *months[] = {"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"};
+          if (now.is_valid()) {
+            it.printf(160, 18, id(font_title_24), id(text_main), TextAlign::TOP_CENTER, "%s %d %s", days[now.day_of_week - 1], now.day_of_month, months[now.month - 1]);
+            if (id(time_display_format).state == "12h") {
+              char time_buf[8];
+              snprintf(time_buf, sizeof(time_buf), "%02d :%02d", ((now.hour + 11) % 12) + 1, now.minute);
+              it.printf(160, 110, id(saver_font_clock), id(text_main), TextAlign::CENTER, "%s", time_buf);
+            } else {
+              it.strftime(160, 110, id(saver_font_clock), TextAlign::CENTER, "%H :%M", now);
+            }
+          } else {
+            it.printf(160, 18, id(font_title_24), id(text_main), TextAlign::TOP_CENTER, "--");
+            it.printf(160, 110, id(saver_font_clock), id(text_main), TextAlign::CENTER, "-- :--");
+          }
+          it.printf(160, 202, id(saver_font_temp), id(text_soft), TextAlign::CENTER, "%.1fC", id(ac_room_temperature).state);
+
+      - id: ota_page
+        lambda: |-
+          int phase = id(ui_tick) % 3;
+          it.fill(id(ink));
+          it.printf(160, 68, id(icon_lg), id(accent_amber), TextAlign::CENTER, "\U000F08D6");
+          it.printf(160, 144, id(font_title_24), id(text_main), TextAlign::CENTER, "Applying update");
+          it.printf(160, 172, id(font_ui_14), id(text_soft), TextAlign::CENTER, "The touch stack may restart after OTA");
+          for (int i = 0; i < 3; i++) {
+            it.filled_rectangle(118 + (i * 28), 202, 18, 12, i == phase ? id(accent_amber) : id(surface_2));
+          }
+
+i2c:
+  - id: bus_a
+    sda: GPIO08
+    scl: GPIO18
+    scan: true
+    sda_pullup_enabled: true
+    scl_pullup_enabled: true
+    frequency: 100kHz
+
+  - id: bus_b
+    sda: GPIO41
+    scl: GPIO40
+    scan: true
+    sda_pullup_enabled: true
+    scl_pullup_enabled: true
+    frequency: 50kHz
+
+touchscreen:
+  - platform: gt911
+    i2c_id: bus_a
+    address: 0x5D
+    id: gt911_touchscreen
+    interrupt_pin:
+      number: GPIO3
+      ignore_strapping_warning: true
+    on_touch:
+      - script.execute: wake_screen
+    on_release:
+      - script.execute: schedule_saver
+
+binary_sensor:
+  - platform: gpio
+    id: top_left_button
+    pin:
+      number: GPIO0
+      mode: INPUT_PULLUP
+      inverted: true
+      ignore_strapping_warning: true
+    on_press:
+      - if:
+          condition:
+            display.is_displaying_page: saver_page
+          then:
+            - script.execute: show_dashboard
+          else:
+            - script.execute: manual_saver
+
+  - platform: gt911
+    id: home_button
+    index: 0
+    on_press:
+      - lambda: id(home_button_press_time) = millis();
+    on_release:
+      - lambda: |-
+          uint32_t press_duration = millis() - id(home_button_press_time);
+          id(is_long_press) = press_duration > 1000;
+      - if:
+          condition:
+            lambda: return id(is_long_press);
+          then:
+            - voice_assistant.start_continuous:
+          else:
+            - if:
+                condition:
+                  display.is_displaying_page: dashboard_page
+                then:
+                  - script.execute: manual_saver
+                else:
+                  - voice_assistant.stop
+                  - script.execute: show_dashboard
+
+  - platform: touchscreen
+    page_id: dashboard_page
+    id: dashboard_climate
+    x_min: 14
+    x_max: 150
+    y_min: 14
+    y_max: 116
+    on_click:
+      then:
+        - display.page.show: comfort_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: dashboard_page
+    id: dashboard_security
+    x_min: 170
+    x_max: 306
+    y_min: 14
+    y_max: 116
+    on_click:
+      then:
+        - display.page.show: security_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: dashboard_page
+    id: dashboard_lights
+    x_min: 14
+    x_max: 150
+    y_min: 124
+    y_max: 226
+    on_click:
+      then:
+        - display.page.show: lights_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: dashboard_page
+    id: dashboard_more
+    x_min: 170
+    x_max: 306
+    y_min: 124
+    y_max: 226
+    on_click:
+      then:
+        - display.page.show: dashboard_more_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: dashboard_more_page
+    id: dashboard_more_media
+    x_min: 14
+    x_max: 150
+    y_min: 14
+    y_max: 116
+    on_click:
+      then:
+        - display.page.show: media_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: dashboard_more_page
+    id: dashboard_more_settings
+    x_min: 170
+    x_max: 306
+    y_min: 14
+    y_max: 116
+    on_click:
+      then:
+        - display.page.show: settings_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: dashboard_more_page
+    id: dashboard_more_system
+    x_min: 14
+    x_max: 150
+    y_min: 124
+    y_max: 226
+    on_click:
+      then:
+        - display.page.show: system_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: dashboard_more_page
+    id: dashboard_more_back
+    x_min: 170
+    x_max: 306
+    y_min: 124
+    y_max: 226
+    on_click:
+      then:
+        - display.page.show: dashboard_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: comfort_page
+    id: comfort_temp_down
+    x_min: 18
+    x_max: 92
+    y_min: 188
+    y_max: 232
+    on_click:
+      then:
+        - homeassistant.service:
+            service: climate.set_temperature
+            data:
+              entity_id: ${climate_entity}
+              temperature: !lambda |-
+                float next = id(ac_target_temperature).state - 1;
+                if (next < 18) next = 18;
+                return next;
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: comfort_page
+    id: comfort_fan_cycle
+    x_min: 154
+    x_max: 298
+    y_min: 66
+    y_max: 94
+    on_click:
+      then:
+        - homeassistant.service:
+            service: climate.set_fan_mode
+            data:
+              entity_id: ${climate_entity}
+              fan_mode: !lambda |-
+                if (id(ac_fan_mode).state == "low") return "med";
+                if (id(ac_fan_mode).state == "med") return "high";
+                return "low";
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: comfort_page
+    id: comfort_temp_up
+    x_min: 228
+    x_max: 302
+    y_min: 188
+    y_max: 232
+    on_click:
+      then:
+        - homeassistant.service:
+            service: climate.set_temperature
+            data:
+              entity_id: ${climate_entity}
+              temperature: !lambda |-
+                float next = id(ac_target_temperature).state + 1;
+                if (next > 32) next = 32;
+                return next;
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: comfort_page
+    id: comfort_mode_off
+    x_min: 18
+    x_max: 106
+    y_min: 140
+    y_max: 180
+    on_click:
+      then:
+        - homeassistant.service:
+            service: climate.set_hvac_mode
+            data:
+              entity_id: ${climate_entity}
+              hvac_mode: "off"
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: comfort_page
+    id: comfort_mode_cool
+    x_min: 116
+    x_max: 204
+    y_min: 140
+    y_max: 180
+    on_click:
+      then:
+        - homeassistant.service:
+            service: climate.set_hvac_mode
+            data:
+              entity_id: ${climate_entity}
+              hvac_mode: "cool"
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: comfort_page
+    id: comfort_mode_heat
+    x_min: 214
+    x_max: 302
+    y_min: 140
+    y_max: 180
+    on_click:
+      then:
+        - homeassistant.service:
+            service: climate.set_hvac_mode
+            data:
+              entity_id: ${climate_entity}
+              hvac_mode: "heat"
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: automation_page
+    id: automation_scenes
+    x_min: 18
+    x_max: 302
+    y_min: 44
+    y_max: 102
+    on_click:
+      then:
+        - display.page.show: scenes_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: automation_page
+    id: automation_macros
+    x_min: 18
+    x_max: 302
+    y_min: 111
+    y_max: 169
+    on_click:
+      then:
+        - display.page.show: macros_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: automation_page
+    id: automation_back
+    x_min: 18
+    x_max: 302
+    y_min: 178
+    y_max: 236
+    on_click:
+      then:
+        - display.page.show: settings_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page
+    id: light_slot_1
+    x_min: 14
+    x_max: 150
+    y_min: 44
+    y_max: 128
+    on_press:
+      then:
+        - lambda: |-
+            id(light_press_start) = millis();
+            id(selected_light_slot) = 1;
+    on_release:
+      then:
+        - if:
+            condition:
+              lambda: return millis() - id(light_press_start) > 650;
+            then:
+              - display.page.show: light_preferences_page
+            else:
+              - homeassistant.service:
+                  service: light.toggle
+                  data:
+                    entity_id: ${light_1_entity}
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page
+    id: light_slot_2
+    x_min: 170
+    x_max: 306
+    y_min: 44
+    y_max: 128
+    on_press:
+      then:
+        - lambda: |-
+            id(light_press_start) = millis();
+            id(selected_light_slot) = 2;
+    on_release:
+      then:
+        - if:
+            condition:
+              lambda: return millis() - id(light_press_start) > 650;
+            then:
+              - display.page.show: light_preferences_page
+            else:
+              - homeassistant.service:
+                  service: light.toggle
+                  data:
+                    entity_id: ${light_2_entity}
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page
+    id: light_slot_3
+    x_min: 14
+    x_max: 150
+    y_min: 144
+    y_max: 228
+    on_press:
+      then:
+        - lambda: |-
+            id(light_press_start) = millis();
+            id(selected_light_slot) = 3;
+    on_release:
+      then:
+        - if:
+            condition:
+              lambda: return millis() - id(light_press_start) > 650;
+            then:
+              - display.page.show: light_preferences_page
+            else:
+              - homeassistant.service:
+                  service: light.toggle
+                  data:
+                    entity_id: ${light_3_entity}
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page
+    id: lights_page_next
+    x_min: 170
+    x_max: 306
+    y_min: 144
+    y_max: 228
+    on_click:
+      then:
+        - display.page.show: lights_page_2
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page_2
+    id: light_slot_4
+    x_min: 14
+    x_max: 150
+    y_min: 40
+    y_max: 98
+    on_press:
+      then:
+        - lambda: |-
+            id(light_press_start) = millis();
+            id(selected_light_slot) = 4;
+    on_release:
+      then:
+        - if:
+            condition:
+              lambda: return millis() - id(light_press_start) > 650;
+            then:
+              - display.page.show: light_preferences_page
+            else:
+              - homeassistant.service:
+                  service: light.toggle
+                  data:
+                    entity_id: ${light_4_entity}
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page_2
+    id: light_slot_5
+    x_min: 170
+    x_max: 306
+    y_min: 40
+    y_max: 98
+    on_press:
+      then:
+        - lambda: |-
+            id(light_press_start) = millis();
+            id(selected_light_slot) = 5;
+    on_release:
+      then:
+        - if:
+            condition:
+              lambda: return millis() - id(light_press_start) > 650;
+            then:
+              - display.page.show: light_preferences_page
+            else:
+              - homeassistant.service:
+                  service: light.toggle
+                  data:
+                    entity_id: ${light_5_entity}
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page_2
+    id: light_slot_6
+    x_min: 14
+    x_max: 150
+    y_min: 106
+    y_max: 164
+    on_press:
+      then:
+        - lambda: |-
+            id(light_press_start) = millis();
+            id(selected_light_slot) = 6;
+    on_release:
+      then:
+        - if:
+            condition:
+              lambda: return millis() - id(light_press_start) > 650;
+            then:
+              - display.page.show: light_preferences_page
+            else:
+              - homeassistant.service:
+                  service: light.toggle
+                  data:
+                    entity_id: ${light_6_entity}
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page_2
+    id: lights_page_back
+    x_min: 170
+    x_max: 306
+    y_min: 106
+    y_max: 164
+    on_click:
+      then:
+        - display.page.show: lights_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: light_preferences_page
+    id: light_preferences_back
+    x_min: 0
+    x_max: 64
+    y_min: 0
+    y_max: 34
+    on_click:
+      then:
+        - if:
+            condition:
+              lambda: return id(selected_light_slot) <= 3;
+            then:
+              - display.page.show: lights_page
+            else:
+              - display.page.show: lights_page_2
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: light_preferences_page
+    id: light_pref_1
+    x_min: 14
+    x_max: 78
+    y_min: 70
+    y_max: 124
+    on_click:
+      then:
+        - script.execute: light_pref_set_1
+
+  - platform: touchscreen
+    page_id: light_preferences_page
+    id: light_pref_25
+    x_min: 90
+    x_max: 154
+    y_min: 70
+    y_max: 124
+    on_click:
+      then:
+        - script.execute: light_pref_set_25
+
+  - platform: touchscreen
+    page_id: light_preferences_page
+    id: light_pref_50
+    x_min: 166
+    x_max: 230
+    y_min: 70
+    y_max: 124
+    on_click:
+      then:
+        - script.execute: light_pref_set_50
+
+  - platform: touchscreen
+    page_id: light_preferences_page
+    id: light_pref_100
+    x_min: 242
+    x_max: 306
+    y_min: 70
+    y_max: 124
+    on_click:
+      then:
+        - script.execute: light_pref_set_100
+
+  - platform: touchscreen
+    page_id: light_preferences_page
+    id: light_pref_orange
+    x_min: 14
+    x_max: 78
+    y_min: 148
+    y_max: 202
+    on_click:
+      then:
+        - script.execute: light_pref_color_orange
+
+  - platform: touchscreen
+    page_id: light_preferences_page
+    id: light_pref_red
+    x_min: 90
+    x_max: 154
+    y_min: 148
+    y_max: 202
+    on_click:
+      then:
+        - script.execute: light_pref_color_red
+
+  - platform: touchscreen
+    page_id: light_preferences_page
+    id: light_pref_purple
+    x_min: 166
+    x_max: 230
+    y_min: 148
+    y_max: 202
+    on_click:
+      then:
+        - script.execute: light_pref_color_purple
+
+  - platform: touchscreen
+    page_id: light_preferences_page
+    id: light_pref_white
+    x_min: 242
+    x_max: 306
+    y_min: 148
+    y_max: 202
+    on_click:
+      then:
+        - script.execute: light_pref_color_white
+
+  - platform: touchscreen
+    page_id: lights_page_2
+    id: lights_page_home
+    x_min: 14
+    x_max: 150
+    y_min: 172
+    y_max: 230
+    on_click:
+      then:
+        - display.page.show: dashboard_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: lights_page_2
+    id: lights_page_system
+    x_min: 170
+    x_max: 306
+    y_min: 172
+    y_max: 230
+    on_click:
+      then:
+        - display.page.show: system_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: scenes_page
+    id: scene_slot_1
+    x_min: 14
+    x_max: 150
+    y_min: 44
+    y_max: 102
+    on_click:
+      then:
+        - homeassistant.service:
+            service: scene.turn_on
+            data:
+              entity_id: ${scene_1_entity}
+
+  - platform: touchscreen
+    page_id: scenes_page
+    id: scene_slot_2
+    x_min: 170
+    x_max: 306
+    y_min: 44
+    y_max: 102
+    on_click:
+      then:
+        - homeassistant.service:
+            service: scene.turn_on
+            data:
+              entity_id: ${scene_2_entity}
+
+  - platform: touchscreen
+    page_id: scenes_page
+    id: scene_slot_3
+    x_min: 14
+    x_max: 150
+    y_min: 108
+    y_max: 166
+    on_click:
+      then:
+        - homeassistant.service:
+            service: scene.turn_on
+            data:
+              entity_id: ${scene_3_entity}
+
+  - platform: touchscreen
+    page_id: scenes_page
+    id: scene_slot_4
+    x_min: 170
+    x_max: 306
+    y_min: 108
+    y_max: 166
+    on_click:
+      then:
+        - homeassistant.service:
+            service: scene.turn_on
+            data:
+              entity_id: ${scene_4_entity}
+
+  - platform: touchscreen
+    page_id: scenes_page
+    id: scene_slot_5
+    x_min: 14
+    x_max: 150
+    y_min: 172
+    y_max: 230
+    on_click:
+      then:
+        - homeassistant.service:
+            service: scene.turn_on
+            data:
+              entity_id: ${scene_5_entity}
+
+  - platform: touchscreen
+    page_id: scenes_page
+    id: scene_slot_6
+    x_min: 170
+    x_max: 306
+    y_min: 172
+    y_max: 230
+    on_click:
+      then:
+        - homeassistant.service:
+            service: scene.turn_on
+            data:
+              entity_id: ${scene_6_entity}
+
+  - platform: touchscreen
+    page_id: macros_page
+    id: macro_slot_1
+    x_min: 14
+    x_max: 150
+    y_min: 44
+    y_max: 102
+    on_click:
+      then:
+        - homeassistant.service:
+            service: script.turn_on
+            data:
+              entity_id: ${macro_1_entity}
+
+  - platform: touchscreen
+    page_id: macros_page
+    id: macro_slot_2
+    x_min: 170
+    x_max: 306
+    y_min: 44
+    y_max: 102
+    on_click:
+      then:
+        - homeassistant.service:
+            service: script.turn_on
+            data:
+              entity_id: ${macro_2_entity}
+
+  - platform: touchscreen
+    page_id: macros_page
+    id: macro_slot_3
+    x_min: 14
+    x_max: 150
+    y_min: 108
+    y_max: 166
+    on_click:
+      then:
+        - homeassistant.service:
+            service: script.turn_on
+            data:
+              entity_id: ${macro_3_entity}
+
+  - platform: touchscreen
+    page_id: macros_page
+    id: macro_slot_4
+    x_min: 170
+    x_max: 306
+    y_min: 108
+    y_max: 166
+    on_click:
+      then:
+        - homeassistant.service:
+            service: script.turn_on
+            data:
+              entity_id: ${macro_4_entity}
+
+  - platform: touchscreen
+    page_id: macros_page
+    id: macro_slot_5
+    x_min: 14
+    x_max: 150
+    y_min: 172
+    y_max: 230
+    on_click:
+      then:
+        - homeassistant.service:
+            service: script.turn_on
+            data:
+              entity_id: ${macro_5_entity}
+
+  - platform: touchscreen
+    page_id: macros_page
+    id: macro_slot_6
+    x_min: 170
+    x_max: 306
+    y_min: 172
+    y_max: 230
+    on_click:
+      then:
+        - homeassistant.service:
+            service: script.turn_on
+            data:
+              entity_id: ${macro_6_entity}
+
+  - platform: touchscreen
+    page_id: media_page
+    id: media_route_toggle
+    x_min: 14
+    x_max: 306
+    y_min: 44
+    y_max: 96
+    on_click:
+      then:
+        - switch.toggle: output_audio
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: media_page
+    id: media_button_1
+    x_min: 14
+    x_max: 102
+    y_min: 106
+    y_max: 172
+    on_click:
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.media_previous_track
+                  data:
+                    entity_id: media_player.${external_media_player}
+            else:
+              - lambda: |-
+                  if (id(speaker_volume) > 0) id(speaker_volume) -= 1;
+              - script.execute: set_volume
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: media_page
+    id: media_button_2
+    x_min: 116
+    x_max: 204
+    y_min: 106
+    y_max: 172
+    on_click:
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.media_play_pause
+                  data:
+                    entity_id: media_player.${external_media_player}
+            else:
+              - if:
+                  condition:
+                    media_player.is_idle:
+                  then:
+                    - media_player.play
+                  else:
+                    - media_player.stop
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: media_page
+    id: media_button_3
+    x_min: 218
+    x_max: 306
+    y_min: 106
+    y_max: 172
+    on_click:
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.media_next_track
+                  data:
+                    entity_id: media_player.${external_media_player}
+            else:
+              - lambda: |-
+                  if (id(speaker_volume) < 10) id(speaker_volume) += 1;
+              - script.execute: set_volume
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: media_page
+    id: media_button_4
+    x_min: 14
+    x_max: 102
+    y_min: 176
+    y_max: 238
+    on_click:
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.volume_down
+                  data:
+                    entity_id: media_player.${external_media_player}
+            else:
+              - switch.toggle: output_audio
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: media_page
+    id: media_button_5
+    x_min: 116
+    x_max: 204
+    y_min: 176
+    y_max: 238
+    on_click:
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - switch.toggle: ext_media_mute
+            else:
+              - switch.toggle: media_mute
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: media_page
+    id: media_button_6
+    x_min: 218
+    x_max: 306
+    y_min: 176
+    y_max: 238
+    on_click:
+      then:
+        - if:
+            condition:
+              switch.is_on: output_audio
+            then:
+              - homeassistant.service:
+                  service: media_player.volume_up
+                  data:
+                    entity_id: media_player.${external_media_player}
+            else:
+              - lambda: |-
+                  id(speaker_volume) += 2;
+                  if (id(speaker_volume) > 10) id(speaker_volume) = 10;
+              - script.execute: set_volume
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: security_page
+    id: security_arm_home
+    x_min: 14
+    x_max: 150
+    y_min: 124
+    y_max: 178
+    on_click:
+      then:
+        - lambda: id(pending_alarm_action) = "arm_home";
+        - display.page.show: alarm_keypad_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: security_page
+    id: security_arm_away
+    x_min: 170
+    x_max: 306
+    y_min: 124
+    y_max: 178
+    on_click:
+      then:
+        - lambda: id(pending_alarm_action) = "arm_away";
+        - display.page.show: alarm_keypad_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: security_page
+    id: security_arm_night
+    x_min: 14
+    x_max: 150
+    y_min: 186
+    y_max: 238
+    on_click:
+      then:
+        - lambda: id(pending_alarm_action) = "arm_night";
+        - display.page.show: alarm_keypad_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: security_page
+    id: security_disarm
+    x_min: 170
+    x_max: 306
+    y_min: 186
+    y_max: 238
+    on_click:
+      then:
+        - lambda: id(pending_alarm_action) = "disarm";
+        - display.page.show: alarm_keypad_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: settings_page
+    id: settings_voice
+    x_min: 14
+    x_max: 150
+    y_min: 44
+    y_max: 102
+    on_click:
+      then:
+        - display.page.show: voice_settings_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: settings_page
+    id: settings_display
+    x_min: 170
+    x_max: 306
+    y_min: 44
+    y_max: 102
+    on_click:
+      then:
+        - display.page.show: display_settings_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: settings_page
+    id: settings_saver
+    x_min: 14
+    x_max: 150
+    y_min: 110
+    y_max: 168
+    on_click:
+      then:
+        - display.page.show: saver_settings_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: settings_page
+    id: settings_network
+    x_min: 170
+    x_max: 306
+    y_min: 110
+    y_max: 168
+    on_click:
+      then:
+        - display.page.show: network_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: settings_page
+    id: settings_system
+    x_min: 14
+    x_max: 150
+    y_min: 176
+    y_max: 234
+    on_click:
+      then:
+        - display.page.show: system_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: settings_page
+    id: settings_automation
+    x_min: 170
+    x_max: 306
+    y_min: 176
+    y_max: 234
+    on_click:
+      then:
+        - display.page.show: automation_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: voice_settings_page
+    id: voice_engine_toggle
+    x_min: 12
+    x_max: 308
+    y_min: 38
+    y_max: 70
+    on_click:
+      then:
+        - select.operation:
+            id: wake_word_engine_location
+            operation: Next
+            cycle: true
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: voice_settings_page
+    id: voice_mute_responses
+    x_min: 12
+    x_max: 308
+    y_min: 72
+    y_max: 104
+    on_click:
+      then:
+        - switch.toggle: mute_response_switch
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: voice_settings_page
+    id: voice_wake_tone
+    x_min: 12
+    x_max: 308
+    y_min: 106
+    y_max: 138
+    on_click:
+      then:
+        - switch.toggle: wake_sound
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: voice_settings_page
+    id: voice_show_conversation
+    x_min: 12
+    x_max: 308
+    y_min: 140
+    y_max: 172
+    on_click:
+      then:
+        - switch.toggle: display_conversation
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: voice_settings_page
+    id: voice_mute_assistant
+    x_min: 12
+    x_max: 308
+    y_min: 174
+    y_max: 206
+    on_click:
+      then:
+        - switch.toggle: mute_switch
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: voice_settings_page
+    id: voice_test
+    x_min: 12
+    x_max: 308
+    y_min: 208
+    y_max: 240
+    on_press:
+      then:
+        - switch.turn_on: mute_switch
+        - lambda: id(va).set_use_wake_word(false);
+        - delay: 100ms
+        - voice_assistant.start
+        - wait_until:
+            not:
+              voice_assistant.is_running:
+        - voice_assistant.stop
+    on_release:
+      then:
+        - switch.turn_off: mute_switch
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: saver_settings_page
+    id: saver_timeout_open
+    x_min: 12
+    x_max: 308
+    y_min: 40
+    y_max: 72
+    on_click:
+      then:
+        - display.page.show: timeout_settings_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: saver_settings_page
+    id: saver_enable_toggle
+    x_min: 12
+    x_max: 308
+    y_min: 76
+    y_max: 108
+    on_click:
+      then:
+        - switch.toggle: s_saver
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: saver_settings_page
+    id: saver_presence_toggle
+    x_min: 12
+    x_max: 308
+    y_min: 112
+    y_max: 144
+    on_click:
+      then:
+        - switch.toggle: s_saver_presc
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: saver_settings_page
+    id: saver_blank_toggle
+    x_min: 12
+    x_max: 308
+    y_min: 148
+    y_max: 180
+    on_click:
+      then:
+        - switch.toggle: s_saver_mode
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: saver_settings_page
+    id: saver_preview
+    x_min: 12
+    x_max: 308
+    y_min: 184
+    y_max: 240
+    on_click:
+      then:
+        - script.execute: manual_saver
+
+  - platform: touchscreen
+    page_id: display_settings_page
+    id: display_output_toggle
+    x_min: 12
+    x_max: 308
+    y_min: 40
+    y_max: 72
+    on_click:
+      then:
+        - switch.toggle: output_audio
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: display_settings_page
+    id: display_brightness_down
+    x_min: 176
+    x_max: 210
+    y_min: 90
+    y_max: 120
+    on_press:
+      then:
+        - lambda: |-
+            int value = id(s_default_brightness).state - 5;
+            if (value < 20) value = 20;
+            auto call = id(s_default_brightness).make_call();
+            call.set_value(value);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: display_settings_page
+    id: display_brightness_up
+    x_min: 268
+    x_max: 302
+    y_min: 90
+    y_max: 120
+    on_press:
+      then:
+        - lambda: |-
+            int value = id(s_default_brightness).state + 5;
+            if (value > 100) value = 100;
+            auto call = id(s_default_brightness).make_call();
+            call.set_value(value);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: display_settings_page
+    id: display_time_format
+    x_min: 12
+    x_max: 308
+    y_min: 144
+    y_max: 176
+    on_click:
+      then:
+        - select.operation:
+            id: time_format
+            operation: Next
+            cycle: true
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: timeout_settings_page
+    id: timeout_saver_down
+    x_min: 12
+    x_max: 82
+    y_min: 42
+    y_max: 114
+    on_click:
+      then:
+        - lambda: |-
+            int value = id(s_saver_delay).state - 5;
+            if (value < 10) value = 10;
+            auto call = id(s_saver_delay).make_call();
+            call.set_value(value);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: timeout_settings_page
+    id: timeout_saver_up
+    x_min: 82
+    x_max: 152
+    y_min: 42
+    y_max: 114
+    on_click:
+      then:
+        - lambda: |-
+            int value = id(s_saver_delay).state + 5;
+            auto call = id(s_saver_delay).make_call();
+            call.set_value(value);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: timeout_settings_page
+    id: timeout_dim_down
+    x_min: 168
+    x_max: 238
+    y_min: 42
+    y_max: 114
+    on_click:
+      then:
+        - lambda: |-
+            int value = id(s_saver_brightness).state - 5;
+            if (value < 20) value = 20;
+            auto call = id(s_saver_brightness).make_call();
+            call.set_value(value);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: timeout_settings_page
+    id: timeout_dim_up
+    x_min: 238
+    x_max: 308
+    y_min: 42
+    y_max: 114
+    on_click:
+      then:
+        - lambda: |-
+            int value = id(s_saver_brightness).state + 5;
+            if (value > 100) value = 100;
+            auto call = id(s_saver_brightness).make_call();
+            call.set_value(value);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: timeout_settings_page
+    id: timeout_blank_down
+    x_min: 12
+    x_max: 82
+    y_min: 126
+    y_max: 198
+    on_click:
+      then:
+        - lambda: |-
+            int value = id(s_saver_blank_delay).state - 5;
+            if (value < 10) value = 10;
+            auto call = id(s_saver_blank_delay).make_call();
+            call.set_value(value);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: timeout_settings_page
+    id: timeout_blank_up
+    x_min: 82
+    x_max: 152
+    y_min: 126
+    y_max: 198
+    on_click:
+      then:
+        - lambda: |-
+            int value = id(s_saver_blank_delay).state + 5;
+            auto call = id(s_saver_blank_delay).make_call();
+            call.set_value(value);
+            call.perform();
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: timeout_settings_page
+    id: timeout_preview
+    x_min: 168
+    x_max: 308
+    y_min: 126
+    y_max: 198
+    on_click:
+      then:
+        - script.execute: manual_saver
+
+  - platform: touchscreen
+    pages:
+      - voice_settings_page
+      - saver_settings_page
+      - display_settings_page
+      - network_page
+      - system_page
+      - light_preferences_page
+    id: settings_subpage_back
+    x_min: 0
+    x_max: 64
+    y_min: 0
+    y_max: 34
+    on_click:
+      then:
+        - display.page.show: settings_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: timeout_settings_page
+    id: timeout_back
+    x_min: 0
+    x_max: 64
+    y_min: 0
+    y_max: 34
+    on_click:
+      then:
+        - display.page.show: saver_settings_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_keypad_back
+    x_min: 0
+    x_max: 64
+    y_min: 0
+    y_max: 34
+    on_click:
+      then:
+        - lambda: |-
+            id(current_pin) = "";
+            id(pending_alarm_action) = "";
+        - display.page.show: security_page
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: saver_page
+    id: saver_wake
+    x_min: 0
+    x_max: 320
+    y_min: 0
+    y_max: 240
+    on_click:
+      then:
+        - script.execute: show_dashboard
+
+  - platform: touchscreen
+    page_id: timer_finished_page
+    id: timer_dismiss
+    x_min: 0
+    x_max: 320
+    y_min: 0
+    y_max: 240
+    on_click:
+      then:
+        - switch.turn_off: timer_ringing
+        - script.execute: show_dashboard
+
+  - platform: touchscreen
+    page_id: notification_page
+    id: notification_dismiss
+    x_min: 0
+    x_max: 320
+    y_min: 0
+    y_max: 240
+    on_click:
+      then:
+        - script.execute: show_dashboard
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_digit_1
+    x_min: 12
+    x_max: 60
+    y_min: 44
+    y_max: 82
+    on_click:
+      then:
+        - lambda: id(current_pin) += "1";
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_digit_2
+    x_min: 68
+    x_max: 116
+    y_min: 44
+    y_max: 82
+    on_click:
+      then:
+        - lambda: id(current_pin) += "2";
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_digit_3
+    x_min: 124
+    x_max: 172
+    y_min: 44
+    y_max: 82
+    on_click:
+      then:
+        - lambda: id(current_pin) += "3";
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_digit_4
+    x_min: 12
+    x_max: 60
+    y_min: 90
+    y_max: 128
+    on_click:
+      then:
+        - lambda: id(current_pin) += "4";
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_digit_5
+    x_min: 68
+    x_max: 116
+    y_min: 90
+    y_max: 128
+    on_click:
+      then:
+        - lambda: id(current_pin) += "5";
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_digit_6
+    x_min: 124
+    x_max: 172
+    y_min: 90
+    y_max: 128
+    on_click:
+      then:
+        - lambda: id(current_pin) += "6";
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_digit_7
+    x_min: 12
+    x_max: 60
+    y_min: 136
+    y_max: 174
+    on_click:
+      then:
+        - lambda: id(current_pin) += "7";
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_digit_8
+    x_min: 68
+    x_max: 116
+    y_min: 136
+    y_max: 174
+    on_click:
+      then:
+        - lambda: id(current_pin) += "8";
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_digit_9
+    x_min: 124
+    x_max: 172
+    y_min: 136
+    y_max: 174
+    on_click:
+      then:
+        - lambda: id(current_pin) += "9";
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_digit_0
+    x_min: 68
+    x_max: 116
+    y_min: 182
+    y_max: 220
+    on_click:
+      then:
+        - lambda: id(current_pin) += "0";
+        - component.update: s3_box_lcd
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_submit
+    x_min: 188
+    x_max: 308
+    y_min: 136
+    y_max: 174
+    on_click:
+      then:
+        - script.execute: submit_alarm_action
+
+  - platform: touchscreen
+    page_id: alarm_keypad_page
+    id: alarm_clear
+    x_min: 188
+    x_max: 308
+    y_min: 182
+    y_max: 220
+    on_click:
+      then:
+        - lambda: id(current_pin) = "";
+        - component.update: s3_box_lcd
