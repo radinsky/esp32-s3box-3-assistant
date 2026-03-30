@@ -11,21 +11,21 @@ GitHub-friendly ESPHome configuration for the ESP32-S3-Box-3 with:
 
 | Home | Climate |
 | --- | --- |
-| ![Home dashboard](IMG_4535.jpeg) | ![Climate controls](IMG_4536.jpeg) |
+| ![Home dashboard](screenshots/IMG_4535.jpeg) | ![Climate controls](screenshots/IMG_4536.jpeg) |
 
 | Voice | Settings |
 | --- | --- |
-| ![Listening state](IMG_4538.jpeg) | ![Settings overview](IMG_4543.jpeg) |
+| ![Listening state](screenshots/IMG_4538.jpeg) | ![Settings overview](screenshots/IMG_4543.jpeg) |
 
 | Media and system | Idle clock |
 | --- | --- |
-| ![Media and system screen](IMG_4542.jpeg) | ![Idle clock screen](IMG_4544.jpeg) |
+| ![Media and system screen](screenshots/IMG_4542.jpeg) | ![Idle clock screen](screenshots/IMG_4544.jpeg) |
 
 ## Files
 
 - `esp32-s3box-3-assistant-gh.yaml`: main ESPHome config template
 - `INSTRUCTIONS.md`: secondary reference notes
-- `IMG_4535.jpeg` to `IMG_4544.jpeg`: example device screenshots used in this README
+- `screenshots/`: example device screenshots used in this README
 
 ## What This Template Changes
 
